@@ -1,0 +1,31 @@
+# competition data
+data/raw/
+data/features/
+
+# model weights
+weights/pretrained/
+weights/heads/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# outputs
+outputs/experiments/
+outputs/submissions/*.csv
+
+# python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# env
+.env
+.venv/
+venv/
+wandb/
+

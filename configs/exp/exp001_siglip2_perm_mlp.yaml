@@ -1,0 +1,46 @@
+experiment:
+  id: exp001_siglip2_perm_mlp
+  seed: 42
+
+data:
+  train_csv: data/raw/train.csv
+  test_csv: data/raw/test.csv
+  sample_submission_csv: data/raw/sample_submission.csv
+  split_train: data/splits/train_v1.csv
+  split_valid: data/splits/valid_v1.csv
+  feature_dir: data/features/siglip2_base_224
+
+encoder:
+  name: google/siglip2-base-patch16-224
+  local_dir: weights/pretrained/siglip2_base_224
+  freeze: true
+  dtype: fp16
+  image_size: 224
+  normalize: true
+  local_files_only: true
+
+features:
+  use_cache: true
+  include_quality: false
+  quality_dim: 9
+
+model:
+  frame_hidden_dim: 256
+  pairwise_aux:
+    enabled: false
+    weight: 0.0
+
+train:
+  epochs: 20
+  batch_size: 128
+  lr: 0.0003
+  weight_decay: 0.01
+  label_smoothing: 0.05
+  amp: true
+  grad_clip: 1.0
+  warmup_ratio: 0.05
+
+output:
+  dir: outputs/experiments/exp001_siglip2_perm_mlp
+  checkpoint: weights/heads/exp001_perm_ranker.pt
+

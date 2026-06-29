@@ -1,0 +1,33 @@
+experiment:
+  id: final
+  seed: 42
+
+data:
+  test_csv: data/raw/test.csv
+  sample_submission_csv: data/raw/sample_submission.csv
+
+encoder:
+  name: google/siglip2-base-patch16-224
+  local_dir: weights/pretrained/siglip2_base_224
+  dtype: fp16
+  image_size: 224
+  local_files_only: true
+
+features:
+  include_quality: true
+  quality_dim: 9
+
+model:
+  frame_hidden_dim: 256
+  pairwise_aux:
+    enabled: true
+    hidden_dim: 512
+    weight: 0.3
+
+inference:
+  batch_size: 32
+
+output:
+  checkpoint: weights/heads/final_ranker.pt
+  submission: outputs/submissions/final_submission.csv
+

@@ -1,0 +1,59 @@
+experiment:
+  id: exp003_siglip2_quality_pair_aux
+  seed: 42
+
+data:
+  train_csv: data/raw/train.csv
+  test_csv: data/raw/test.csv
+  sample_submission_csv: data/raw/sample_submission.csv
+  split_train: data/splits/train_v1.csv
+  split_valid: data/splits/valid_v1.csv
+  feature_dir: data/features/siglip2_base_224
+
+encoder:
+  name: google/siglip2-base-patch16-224
+  local_dir: weights/pretrained/siglip2_base_224
+  freeze: true
+  dtype: fp16
+  image_size: 224
+  normalize: true
+  local_files_only: true
+
+features:
+  use_cache: true
+  include_quality: true
+  quality_dim: 9
+
+model:
+  frame_hidden_dim: 256
+  perm_scorer:
+    hidden_dims: [1024, 256]
+    dropout: 0.2
+  pairwise_aux:
+    enabled: true
+    hidden_dim: 512
+    weight: 0.3
+
+train:
+  epochs: 20
+  batch_size: 128
+  lr: 0.0003
+  weight_decay: 0.01
+  label_smoothing: 0.05
+  optimizer: adamw
+  scheduler: cosine
+  warmup_ratio: 0.05
+  amp: true
+  grad_clip: 1.0
+  early_stopping_patience: 5
+
+eval:
+  primary_metric: exact_match
+  extra_metrics:
+    - pairwise_acc
+    - top1_top2_margin
+
+output:
+  dir: outputs/experiments/exp003_siglip2_quality_pair_aux
+  checkpoint: weights/heads/exp003_siglip2_quality_pair_aux.pt
+

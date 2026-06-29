@@ -1,0 +1,9 @@
+pretrained:
+  siglip2_base_224:
+    name: google/siglip2-base-patch16-224
+    local_dir: weights/pretrained/siglip2_base_224
+    public_before: 2026-05-31
+heads:
+  final:
+    path: weights/heads/final_ranker.pt
+

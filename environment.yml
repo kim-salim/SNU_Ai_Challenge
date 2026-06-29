@@ -1,0 +1,17 @@
+name: snu-ai-frame-ordering
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pillow
+  - pyyaml
+  - pytest
+  - pytorch
+  - torchvision
+  - pip:
+      - transformers>=4.45
+

@@ -1,0 +1,11 @@
+experiment:
+  id: exp000_random
+  seed: 42
+
+data:
+  test_csv: data/raw/test.csv
+  sample_submission_csv: data/raw/sample_submission.csv
+
+output:
+  submission: outputs/submissions/exp000_random.csv
+

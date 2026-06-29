@@ -1,0 +1,9 @@
+encoder:
+  name: google/siglip2-base-patch16-224
+  local_dir: weights/pretrained/siglip2_base_224
+  freeze: true
+  dtype: fp16
+  image_size: 224
+  normalize: true
+  local_files_only: true
+
