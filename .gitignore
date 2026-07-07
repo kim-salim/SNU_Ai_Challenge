@@ -32,3 +32,23 @@ wandb/
 
 # Python editable install metadata
 *.egg-info/
+
+# Competition data - DO NOT COMMIT
+/data/raw/
+/data/splits/
+/data/features/
+
+# Model weights and checkpoints - DO NOT COMMIT
+/weights/pretrained/
+/weights/heads/
+*.pt
+*.pth
+*.safetensors
+
+# Outputs - DO NOT COMMIT
+/outputs/experiments/
+/outputs/submissions/
+*.npz
+
+# Python editable install metadata
+*.egg-info/
