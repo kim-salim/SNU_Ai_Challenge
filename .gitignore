@@ -29,3 +29,6 @@ __pycache__/
 venv/
 wandb/
 
+
+# Python editable install metadata
+*.egg-info/
