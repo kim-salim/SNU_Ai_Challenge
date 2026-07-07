@@ -65,6 +65,11 @@ class SigLIP2Encoder:
                     emb = getattr(outputs, "pooler_output", None)
                 if emb is None:
                     raise RuntimeError("Could not find text embeddings in model outputs")
+        if not hasattr(emb, "float"):
+            emb = getattr(emb, "pooler_output", None)
+            if emb is None:
+                raise RuntimeError("Model output has no pooler_output tensor")
+
         return F.normalize(emb.float(), dim=-1)
 
     def encode_images(self, images: list[Any]) -> Any:
@@ -85,6 +90,11 @@ class SigLIP2Encoder:
                     emb = getattr(outputs, "pooler_output", None)
                 if emb is None:
                     raise RuntimeError("Could not find image embeddings in model outputs")
+        if not hasattr(emb, "float"):
+            emb = getattr(emb, "pooler_output", None)
+            if emb is None:
+                raise RuntimeError("Model output has no pooler_output tensor")
+
         return F.normalize(emb.float(), dim=-1)
 
     def encode_batch(self, sentences: list[str], frames: list[list[Any]]) -> tuple[Any, Any]:
