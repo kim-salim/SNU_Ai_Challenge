@@ -43,7 +43,7 @@ def predict_from_cache(
             end = min(start + batch_size, n)
             text_emb = _to_tensor(cache["text_emb"][start:end], device)
             frame_emb = _to_tensor(cache["frame_emb"][start:end], device)
-            quality = _to_tensor(cache["quality"][start:end], device)
+            quality = None if getattr(projector, "quality_dim", None) == 0 else _to_tensor(cache["quality"][start:end], device)
             frame_tokens = projector(text_emb, frame_emb, quality)
             scores = ranker(frame_tokens)
             scores_np = scores.detach().cpu().numpy()
@@ -131,4 +131,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

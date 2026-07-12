@@ -1,0 +1,72 @@
+experiment:
+  id: qwen3vl_stage_frozen
+  seed: 42
+
+data:
+  train_split: data/splits/ab_v1/train_ab_v1.csv
+  valid_split: data/splits/ab_v1/valid_a_v1.csv
+  lockbox_split: data/splits/ab_v1/valid_b_v1.csv
+  image_root: data/raw
+  train_permutation_augmentation: false
+  permutation_probability: 1.0
+
+backbone:
+  source: base
+  base_model_path: Qwen/Qwen3-VL-8B-Instruct
+  existing_lora_path: weights/qwen3vl_lora24/best
+  local_files_only: true
+  trust_remote_code: true
+  torch_dtype: bfloat16
+  device_map: auto
+  frozen: true
+  disable_deepstack_visual_features: true
+  hidden_size: 4096
+
+model:
+  model_dim: 512
+  set_layers: 2
+  set_heads: 8
+  set_ffn_dim: 2048
+  dropout: 0.1
+  use_set_encoder: false
+  use_pairwise: false
+
+score:
+  stage_weight: 1.0
+  pair_weight: 0.0
+
+loss:
+  permutation_weight: 1.0
+  stage_weight: 0.3
+  pair_weight: 0.0
+  consistency_weight: 0.0
+
+train:
+  epochs_frozen: 20
+  batch_size: 64
+  head_lr: 0.0003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  mixed_precision: bf16
+  use_grad_scaler: false
+  gradient_accumulation_steps: 1
+  grad_clip: 1.0
+  num_workers: 0
+  early_stopping_patience: 4
+  log_interval_steps: 20
+  max_samples: -1
+
+eval:
+  batch_size: 128
+
+cache:
+  dir: outputs/features/qwen3vl_stage_pair
+  batch_size: 1
+  num_workers: 0
+
+baseline:
+  valid_predictions: outputs/experiments/qwen3vl_8b_lora24/valid_a/valid_predictions.csv
+
+output:
+  dir: outputs/experiments/qwen3vl_stage_pair
+  checkpoint_dir: weights/qwen3vl_stage_pair

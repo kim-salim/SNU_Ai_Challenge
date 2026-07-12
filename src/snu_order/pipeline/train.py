@@ -41,8 +41,10 @@ def train(cfg: dict[str, Any]) -> dict[str, float]:
     device = get_device()
 
     feature_dir = Path(str(get_by_path(cfg, "data.feature_dir", "data/features/siglip2_base_224")))
-    train_cache = load_feature_cache(feature_dir / "train.npz")
-    valid_cache = load_feature_cache(feature_dir / "valid.npz")
+    train_cache_path = Path(str(get_by_path(cfg, "data.train_cache", feature_dir / "train.npz")))
+    valid_cache_path = Path(str(get_by_path(cfg, "data.valid_cache", feature_dir / "valid.npz")))
+    train_cache = load_feature_cache(train_cache_path)
+    valid_cache = load_feature_cache(valid_cache_path)
     validate_feature_cache(train_cache, require_labels=True)
     validate_feature_cache(valid_cache, require_labels=True)
 
@@ -95,7 +97,7 @@ def train(cfg: dict[str, Any]) -> dict[str, float]:
             optimizer.zero_grad(set_to_none=True)
             text_emb = batch["text_emb"].to(device)
             frame_emb = batch["frame_emb"].to(device)
-            quality = batch["quality"].to(device)
+            quality = None if getattr(projector, "quality_dim", None) == 0 else batch["quality"].to(device)
             target = batch["target_perm_idx"].to(device)
             pair_labels = batch["pairwise_labels"].to(device)
             with torch.cuda.amp.autocast(enabled=use_amp):
@@ -158,4 +160,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

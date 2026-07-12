@@ -1,0 +1,12 @@
+.git
+.agents
+.codex
+.conda-stage2
+.hf-cache
+.pytest_cache
+logs
+outputs
+weights
+*.zip
+__pycache__
+*.pyc

@@ -1,0 +1,104 @@
+experiment:
+  id: qwen3vl_8b_lora24
+  seed: 42
+
+data:
+  train_split: data/splits/ab_v1/train_ab_v1.csv
+  valid_split: data/splits/ab_v1/valid_a_v1.csv
+  lockbox_split: data/splits/ab_v1/valid_b_v1.csv
+  image_root: data/raw
+  num_frames: 4
+  train_permutation_augmentation: true
+  permutation_probability: 1.0
+
+model:
+  local_dir: Qwen/Qwen3-VL-8B-Instruct
+  local_files_only: true
+  trust_remote_code: true
+  torch_dtype: bfloat16
+  device_map: auto
+  num_classes: 24
+  pooling: last_non_padding_token
+  classifier_dropout: 0.1
+  freeze_vision_encoder: true
+  freeze_base_model: true
+  train_classifier: true
+  disable_deepstack_visual_features: true
+
+processor:
+  min_pixels: null
+  max_pixels: null
+
+attention:
+  use_flash_attention_2: false
+  fallback_to_sdpa: true
+
+quantization:
+  enabled: true
+  bits: 4
+  quant_type: nf4
+  double_quant: true
+  compute_dtype: bf16
+  bf16_fallback: false
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+
+loss:
+  permutation_weight: 1.0
+  pairwise_marginal_weight: 0.2
+  position_marginal_weight: 0.1
+  label_smoothing: 0.05
+
+train:
+  epochs: 4
+  micro_batch_size: 1
+  gradient_accumulation_steps: 16
+  lora_lr: 0.00005
+  classifier_lr: 0.0003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  scheduler: cosine
+  mixed_precision: bf16
+  use_grad_scaler: false
+  ddp_adjust_gradient_accumulation: true
+  ddp_find_unused_parameters: false
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  use_cache: false
+  num_workers: 0
+  eval_strategy: epoch
+  early_stopping_patience: 2
+  save_best_only: true
+  primary_metric: exact_match
+  subset_ratio: 0.2
+  subset_max_samples: 1024
+  overfit64_epochs: 20
+  overfit64_eval_interval: 20
+  overfit64_augmentation: false
+  allow_full_after_low_subset: false
+  log_interval_steps: 20
+
+eval:
+  batch_size: 1
+  profile: false
+  profile_warmup_samples: 20
+
+lockbox:
+  require_explicit_unlock: true
+  min_valid_a_accuracy: 0.33
+  min_valid_b_accuracy: 0.30
+
+output:
+  dir: outputs/experiments/qwen3vl_8b_lora24
+  best_checkpoint: weights/qwen3vl_lora24/best
+  last_checkpoint: weights/qwen3vl_lora24/last
