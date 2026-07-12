@@ -1,0 +1,92 @@
+experiment_name: qwen36_27b_24candidate
+
+model:
+  name: Qwen/Qwen3.6-27B
+  revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+  type: qwen3_6_vl
+  local_files_only: true
+  torch_dtype: bfloat16
+  device_map: auto
+
+quantization:
+  enabled: true
+  bits: 4
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: bfloat16
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+
+attention:
+  use_flash_attention_2: false
+  fallback_to_sdpa: true
+
+processor:
+  min_pixels: null
+  max_pixels: null
+
+input:
+  image_mode: multi_image
+  fallback_image_mode: grid_2x2
+  frame_labels: ["F1", "F2", "F3", "F4"]
+  deterministic_preprocess: true
+  grid_size: 1024
+  grid_label_height: 40
+
+candidate:
+  num_candidates: 24
+  option_labels: "ABCDEFGHIJKLMNOPQRSTUVWX"
+  option_order: lexicographic
+  deterministic_option_shuffle: false
+  shuffle_seed_from_sample_id: true
+
+prompt:
+  language: english
+  use_cot: false
+  return_only_option: true
+  include_candidate_list: true
+  system_prompt: "You are a precise visual temporal ordering assistant."
+
+scoring:
+  mode: option_label_logprob
+  fallback_mode: direct_generation
+  label_token_variants:
+    - "{label}"
+    - " {label}"
+    - "{label}:"
+    - " {label}:"
+  normalize_sequence_logprob: true
+  max_new_tokens: 4
+  do_sample: false
+  temperature: 0.0
+
+runtime:
+  device: cuda
+  batch_size: 1
+  num_workers: 2
+  max_samples: -1
+  benchmark: true
+
+paths:
+  prediction_dir: outputs/predictions/qwen36_27b_24candidate
+  log_dir: logs/qwen36_27b_24candidate
+
+output:
+  save_raw_scores: true
+  save_raw_output: true
+  save_latency: true
+  save_debug_csv: true
+
+metrics:
+  primary: exact_match_accuracy
+  secondary:
+    - parsing_failure_rate
+    - option_distribution
+    - average_margin
+    - time_per_sample
+    - max_vram
+
+lora:
+  enabled: false
+  rank: 8
+  alpha: 16
+  dropout: 0.05

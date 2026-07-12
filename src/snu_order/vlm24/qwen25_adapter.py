@@ -64,14 +64,28 @@ class Qwen25VLAdapter:
         model_name = str(model_cfg.get("name", "Qwen/Qwen2.5-VL-7B-Instruct"))
         model_type = str(model_cfg.get("type", "qwen2_5_vl")).lower()
         local_files_only = bool(model_cfg.get("local_files_only", True))
+        revision = model_cfg.get("revision")
         if model_type == "qwen3_vl":
             model_class = getattr(transformers, "Qwen3VLForConditionalGeneration", None)
             if model_class is None:
                 model_class = getattr(transformers, "AutoModelForMultimodalLM", None)
             if model_class is None:
+                model_class = getattr(transformers, "AutoModelForImageTextToText", None)
+            if model_class is None:
                 raise ImportError(
                     "Qwen3-VL inference requires transformers with Qwen3VLForConditionalGeneration "
                     "or AutoModelForMultimodalLM support"
+                )
+        elif model_type in {"qwen3_5", "qwen3_5_vl", "qwen3_6", "qwen3_6_vl"}:
+            model_class = getattr(transformers, "Qwen3_5ForConditionalGeneration", None)
+            if model_class is None:
+                model_class = getattr(transformers, "AutoModelForImageTextToText", None)
+            if model_class is None:
+                model_class = getattr(transformers, "AutoModelForMultimodalLM", None)
+            if model_class is None:
+                raise ImportError(
+                    "Qwen3.5/3.6 VLM inference requires transformers with "
+                    "Qwen3_5ForConditionalGeneration or AutoModelForImageTextToText support"
                 )
         elif model_type == "qwen2_5_vl":
             model_class = getattr(transformers, "Qwen2_5_VLForConditionalGeneration", None)
@@ -86,6 +100,8 @@ class Qwen25VLAdapter:
             "local_files_only": local_files_only,
             "device_map": model_cfg.get("device_map", "auto"),
         }
+        if revision:
+            model_kwargs["revision"] = str(revision)
         dtype = self._dtype(model_cfg.get("torch_dtype", "bfloat16"))
         if dtype is not None:
             model_kwargs["torch_dtype"] = dtype
@@ -96,6 +112,8 @@ class Qwen25VLAdapter:
             model_kwargs["attn_implementation"] = "flash_attention_2"
 
         processor_kwargs: dict[str, Any] = {"local_files_only": local_files_only}
+        if revision:
+            processor_kwargs["revision"] = str(revision)
         if processor_cfg.get("min_pixels") is not None:
             processor_kwargs["min_pixels"] = int(processor_cfg["min_pixels"])
         if processor_cfg.get("max_pixels") is not None:
@@ -168,7 +186,7 @@ class Qwen25VLAdapter:
         self.load_model_and_processor()
         messages = self.build_messages(prompt, images)
         model_type = str(self.config.get("model", {}).get("type", "qwen2_5_vl")).lower()
-        if model_type == "qwen3_vl":
+        if model_type in {"qwen3_vl", "qwen3_5", "qwen3_5_vl", "qwen3_6", "qwen3_6_vl"}:
             inputs = self.processor.apply_chat_template(
                 messages,
                 tokenize=True,
