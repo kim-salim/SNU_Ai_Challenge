@@ -77,7 +77,10 @@ bash scripts/run_qwen35_9b_stage_pair_v2_text_anchor_end_to_end.sh
 The end-to-end wrapper starts submission inference only after every training-side
 step succeeds. `TRAIN_MAX_SAMPLES` and `SUBMISSION_MAX_SAMPLES` are separate to avoid
 accidentally producing a partial submission. It rejects `SMOKE=1`; smoke runs never
-read test data.
+read test data. When launched from the desktop host, the wrapper automatically
+re-enters `snu-qwen3vl-desktop:latest` with GPU access, the repository Hugging Face
+cache, and read-only data. Set `USE_DOCKER=0` only when already using an equivalent
+pinned Python environment.
 
 Optional one-time lockbox evaluation:
 
