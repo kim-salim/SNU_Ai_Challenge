@@ -40,6 +40,7 @@ from .modeling_stage_pair import (
     write_stage_pair_trainable_report,
 )
 from .stage_pair_scorer import StagePairStructuredLoss, remap_logits_to_canonical
+from .stage_pair_prompt import StagePairPromptSpec, build_prompt_fingerprint, write_prompt_fingerprint
 from .train_lora24 import (
     DistributedState,
     _amp_dtype_and_scaler_enabled,
@@ -53,6 +54,8 @@ from .train_lora24 import (
     _seed_worker,
 )
 from .checkpoint import unwrap_model
+from .calibration_stage_pair import save_raw_stage_pair_logits
+from .lora_targets import validate_gradient_contract
 
 
 MODES = ("frozen_stage", "frozen_stage_set", "frozen_stage_pair", "qlora_stage_pair")
@@ -70,6 +73,10 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[
         out.setdefault("backbone", {})["source"] = args.source
     if args.max_samples is not None:
         out.setdefault("train", {})["max_samples"] = int(args.max_samples)
+    if getattr(args, "max_valid_samples", None) is not None:
+        out.setdefault("eval", {})["max_samples"] = int(args.max_valid_samples)
+    if getattr(args, "epochs", None) is not None:
+        out.setdefault("train", {})["epochs"] = int(args.epochs)
     return out
 
 
@@ -161,15 +168,26 @@ def _make_dataloaders(
         seed=int(get_by_path(cfg, "experiment.seed", 42)),
         max_samples=max_samples if max_samples >= 0 else None,
     )
-    valid_dataset = Qwen3VLSingleFrameDataset(valid_split, str(get_by_path(cfg, "data.image_root", "data/raw")), training=False)
-    enable_thinking = get_by_path(cfg, "prompt.enable_thinking", None)
+    max_valid_samples = int(get_by_path(cfg, "eval.max_samples", -1))
+    valid_dataset = Qwen3VLSingleFrameDataset(
+        valid_split,
+        str(get_by_path(cfg, "data.image_root", "data/raw")),
+        training=False,
+        max_samples=max_valid_samples if max_valid_samples >= 0 else None,
+    )
+    prompt_spec = StagePairPromptSpec.from_config(cfg)
+    model_revision = str(get_by_path(cfg, "backbone.revision", "")) or None
     train_sampler = DistributedSampler(train_dataset, num_replicas=ddp.world_size, rank=ddp.rank, shuffle=True) if ddp.enabled else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(get_by_path(cfg, "train.micro_batch_size_per_gpu", 1)),
         shuffle=train_sampler is None,
         sampler=train_sampler,
-        collate_fn=Qwen3VLSingleFrameCollator(processor, enable_thinking=enable_thinking),
+        collate_fn=Qwen3VLSingleFrameCollator(
+            processor,
+            prompt_spec=prompt_spec,
+            model_revision=model_revision,
+        ),
         num_workers=int(get_by_path(cfg, "train.num_workers", 0)),
         worker_init_fn=_seed_worker,
     )
@@ -178,7 +196,11 @@ def _make_dataloaders(
             valid_dataset,
             batch_size=1,
             shuffle=False,
-            collate_fn=Qwen3VLSingleFrameCollator(processor, enable_thinking=enable_thinking),
+            collate_fn=Qwen3VLSingleFrameCollator(
+                processor,
+                prompt_spec=prompt_spec,
+                model_revision=model_revision,
+            ),
             num_workers=0,
         )
         if ddp.is_main
@@ -245,7 +267,11 @@ def _make_loss(cfg: dict[str, Any]) -> StagePairStructuredLoss:
 def _forward_batch(model: torch.nn.Module, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
     if "frame_hidden" in batch:
         return model(frame_hidden=batch["frame_hidden"])
-    return model(inputs=batch["inputs"], batch_size=int(batch["batch_size"]))
+    return model(
+        inputs=batch["inputs"],
+        batch_size=int(batch["batch_size"]),
+        anchor_mask=batch.get("anchor_mask"),
+    )
 
 
 def evaluate_model(
@@ -255,6 +281,7 @@ def evaluate_model(
     device: torch.device,
     output_dir: str | Path | None,
     baseline_predictions: str | None = None,
+    raw_logits_path: str | Path | None = None,
 ) -> dict[str, Any]:
     model.eval()
     ids: list[str] = []
@@ -286,6 +313,15 @@ def evaluate_model(
     target_t = torch.cat(targets, dim=0)
     answer_t = torch.cat(answers, dim=0)
     metrics = compute_stage_pair_metrics(final_t, target_t, stage_logits=stage_t, pair_logits=pair_t, answer=answer_t, latencies=latencies)
+    if raw_logits_path is not None:
+        save_raw_stage_pair_logits(
+            raw_logits_path,
+            ids=ids,
+            stage_logits=stage_t,
+            pair_logits=pair_t,
+            target_perm_idx=target_t,
+            answer=answer_t,
+        )
     if output_dir is not None:
         write_stage_pair_artifacts(output_dir, ids, final_t, target_t, metrics, stage_logits=stage_t, pair_logits=pair_t)
         if baseline_predictions:
@@ -352,12 +388,24 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
         print(json.dumps({"mode": mode, "run_id": run_id, "distributed": ddp.enabled, "world_size": ddp.world_size}, ensure_ascii=False), flush=True)
 
     model, processor = _build_model(cfg, mode)
+    prompt_fingerprint: dict[str, Any] | None = None
+    if processor is not None and int(get_by_path(cfg, "checkpoint.format_version", 1)) == 2:
+        prompt_fingerprint = build_prompt_fingerprint(cfg, processor)
+        if ddp.is_main:
+            write_prompt_fingerprint(output_dir / "prompt_fingerprint.json", prompt_fingerprint)
     device = ddp.device if ddp.enabled else _model_device(model)
     _move_stage_pair_modules(model, device)
     if mode.startswith("frozen"):
         model.to(device)
     if resume:
-        model, _ = load_stage_pair_checkpoint(resume, model, strict=False, is_trainable=True)
+        model, _ = load_stage_pair_checkpoint(
+            resume,
+            model,
+            strict=bool(get_by_path(cfg, "checkpoint.strict", True)),
+            is_trainable=True,
+            cfg=cfg,
+            processor=processor,
+        )
     if ddp.enabled:
         model = DistributedDataParallel(
             model,
@@ -366,7 +414,8 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
             find_unused_parameters=bool(get_by_path(cfg, "train.ddp_find_unused_parameters", False)),
         )
     if ddp.is_main:
-        write_stage_pair_trainable_report(output_dir / "trainable_parameters.json", model)
+        report = write_stage_pair_trainable_report(output_dir / "trainable_parameter_report.json", model)
+        print(json.dumps({"event": "trainable_parameter_report", **report}, ensure_ascii=False), flush=True)
 
     train_loader, valid_loader, _ = _make_dataloaders(cfg, mode, ddp, processor)
     optimizer = _build_optimizer(model, cfg)
@@ -384,6 +433,7 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
     skip_nonfinite_grad_steps = bool(get_by_path(cfg, "train.skip_nonfinite_grad_steps", False))
     max_consecutive_nonfinite = int(get_by_path(cfg, "train.max_consecutive_nonfinite_grad_steps", 3))
     consecutive_nonfinite = 0
+    gradient_contract_checked = False
     patience = int(get_by_path(cfg, "train.early_stopping_patience", 4 if mode.startswith("frozen") else 2))
     best_metrics: dict[str, Any] | None = None
     history: list[dict[str, Any]] = []
@@ -426,6 +476,16 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
+            if not gradient_contract_checked and mode == "qlora_stage_pair":
+                raw_model = unwrap_model(model)
+                if isinstance(getattr(getattr(raw_model, "backbone", None), "_stage_pair_lora_target_manifest", None), list):
+                    gradient_report = validate_gradient_contract(raw_model)
+                    gradient_contract_checked = True
+                    if ddp.is_main:
+                        print(
+                            json.dumps({"event": "gradient_contract", **gradient_report}, ensure_ascii=False),
+                            flush=True,
+                        )
             running += float(loss_out.loss.detach().cpu())
             seen += 1
             if sync_step:
@@ -492,11 +552,30 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
             metrics["train_loss"] = train_loss
             history.append(metrics)
             print(json.dumps({"epoch": epoch, "valid_exact": metrics["exact_match"], "stage_accuracy": metrics["stage_accuracy"]}, ensure_ascii=False), flush=True)
-            save_stage_pair_checkpoint(last_ckpt, model, cfg, metrics, processor=processor, optimizer=optimizer, scheduler=scheduler, extra=extra)
+            save_stage_pair_checkpoint(
+                last_ckpt,
+                model,
+                cfg,
+                metrics,
+                processor=processor,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                extra=extra,
+                prompt_fingerprint=prompt_fingerprint,
+            )
             if _is_better(metrics, best_metrics):
                 best_metrics = dict(metrics)
                 epochs_without_improvement = 0
-                save_stage_pair_checkpoint(best_ckpt, model, cfg, best_metrics, processor=processor, extra=extra, minimal=True)
+                save_stage_pair_checkpoint(
+                    best_ckpt,
+                    model,
+                    cfg,
+                    best_metrics,
+                    processor=processor,
+                    extra=extra,
+                    minimal=True,
+                    prompt_fingerprint=prompt_fingerprint,
+                )
             else:
                 epochs_without_improvement += 1
                 stop_training = patience > 0 and epochs_without_improvement >= patience
@@ -523,6 +602,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=MODES, required=True)
     parser.add_argument("--source", choices=["base", "existing_lora"], default=None)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--max-valid-samples", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)

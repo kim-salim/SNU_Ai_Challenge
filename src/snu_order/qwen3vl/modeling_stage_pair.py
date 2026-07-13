@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +9,11 @@ from torch import nn
 from snu_order.utils.config import get_by_path
 from snu_order.utils.io import write_json
 
-from .checkpoint import load_lora24_checkpoint, unwrap_model
+from .checkpoint import unwrap_model
+from .lora_targets import (
+    assert_no_cpu_disk_offload,
+    lora_target_summary,
+)
 from .modeling_lora24 import (
     LastNonPaddingPooler,
     _hidden_size_from_config,
@@ -22,6 +24,13 @@ from .modeling_lora24 import (
     trainable_parameter_report,
 )
 from .permutations import PAIRS, PERMS
+from .stage_pair_prompt import (
+    ANCHOR_POOLING_MODE,
+    LEGACY_POOLING_MODE,
+    AnchorSpanMeanPooler,
+    StagePairPromptSpec,
+)
+from .stage_pair_checkpoint import load_stage_pair_checkpoint, save_stage_pair_checkpoint
 from .stage_pair_scorer import structured_permutation_logits
 
 
@@ -126,6 +135,7 @@ class Qwen3VLStagePairModel(nn.Module):
         stage_weight: float = 1.0,
         pair_score_weight: float = 0.3,
         backbone_trainable: bool = False,
+        pooling_mode: str = LEGACY_POOLING_MODE,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -135,7 +145,11 @@ class Qwen3VLStagePairModel(nn.Module):
         self.stage_weight = float(stage_weight)
         self.pair_score_weight = float(pair_score_weight)
         self.backbone_trainable = bool(backbone_trainable)
+        if pooling_mode not in {LEGACY_POOLING_MODE, ANCHOR_POOLING_MODE}:
+            raise RuntimeError(f"Unsupported pooling mode: {pooling_mode}")
+        self.pooling_mode = pooling_mode
         self.pooler = LastNonPaddingPooler()
+        self.anchor_pooler = AnchorSpanMeanPooler()
         self.set_encoder = PositionFreeSetEncoder(
             self.hidden_size,
             model_dim=self.model_dim,
@@ -148,13 +162,24 @@ class Qwen3VLStagePairModel(nn.Module):
         self.stage_head = StageHead(self.model_dim, dropout=dropout)
         self.pair_head = AntiSymmetricPairwiseHead(self.model_dim, self.model_dim, dropout=dropout) if self.use_pairwise else None
 
-    def extract_frame_representations(self, inputs: dict[str, Any], *, batch_size: int) -> torch.Tensor:
+    def extract_frame_representations(
+        self,
+        inputs: dict[str, Any],
+        *,
+        batch_size: int,
+        anchor_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if self.backbone is None:
             raise ValueError("backbone is required for live Qwen frame representation extraction")
         attention_mask = inputs.get("attention_mask")
         if attention_mask is None:
             raise ValueError("attention_mask is required for last non-padding pooling")
         kwargs = dict(inputs)
+        embedded_anchor_mask = kwargs.pop("anchor_mask", None)
+        if embedded_anchor_mask is not None:
+            if anchor_mask is not None:
+                raise RuntimeError("anchor_mask was supplied both inside inputs and as an explicit argument")
+            anchor_mask = embedded_anchor_mask
         kwargs["output_hidden_states"] = True
         kwargs["return_dict"] = True
         kwargs["use_cache"] = False
@@ -164,7 +189,14 @@ class Qwen3VLStagePairModel(nn.Module):
         last_hidden = hidden_states[-1] if hidden_states is not None else getattr(outputs, "last_hidden_state", None)
         if last_hidden is None:
             raise ValueError("Backbone output does not contain hidden states")
-        pooled = self.pooler(last_hidden, attention_mask.to(last_hidden.device))
+        if self.pooling_mode == ANCHOR_POOLING_MODE:
+            if anchor_mask is None:
+                raise RuntimeError("anchor_span_mean pooling requires an explicit anchor_mask")
+            pooled = self.anchor_pooler(last_hidden, anchor_mask)
+        else:
+            if anchor_mask is not None:
+                raise RuntimeError("last_non_padding pooling must not receive anchor_mask")
+            pooled = self.pooler(last_hidden, attention_mask.to(last_hidden.device))
         expected = int(batch_size) * 4
         if pooled.shape[0] != expected:
             raise ValueError(f"Expected B*4={expected} frame representations, got {pooled.shape[0]}")
@@ -176,11 +208,16 @@ class Qwen3VLStagePairModel(nn.Module):
         frame_hidden: torch.Tensor | None = None,
         inputs: dict[str, Any] | None = None,
         batch_size: int | None = None,
+        anchor_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if frame_hidden is None:
             if inputs is None or batch_size is None:
                 raise ValueError("Either frame_hidden or inputs+batch_size must be provided")
-            frame_hidden = self.extract_frame_representations(inputs, batch_size=int(batch_size))
+            frame_hidden = self.extract_frame_representations(
+                inputs,
+                batch_size=int(batch_size),
+                anchor_mask=anchor_mask,
+            )
         contextual = self.set_encoder(frame_hidden)
         stage_logits = self.stage_head(contextual)
         pair_logits = self.pair_head(contextual) if self.pair_head is not None else None
@@ -213,6 +250,7 @@ def build_stage_pair_head_from_config(cfg: dict[str, Any], *, hidden_size: int, 
         stage_weight=float(get_by_path(cfg, "score.stage_weight", 1.0)),
         pair_score_weight=float(get_by_path(cfg, "score.pair_weight", 0.3)),
         backbone_trainable=not bool(get_by_path(cfg, "backbone.frozen", True)),
+        pooling_mode=StagePairPromptSpec.from_config(cfg).pooling_mode,
     )
 
 
@@ -257,15 +295,25 @@ def build_stage_pair_model_from_config(cfg: dict[str, Any], *, live_backbone: bo
         "quantization": cfg.get("quantization", {}),
         "train": cfg.get("train", {}),
         "lora": cfg.get("lora", {}),
+        "vision_merger_lora": cfg.get("vision_merger_lora", {}),
+        "runtime": cfg.get("runtime", {}),
     }
     if get_by_path(cfg, "backbone.revision", None):
         backbone_cfg["model"]["revision"] = get_by_path(cfg, "backbone.revision")
     backbone = load_qwen3_backbone(backbone_cfg)
+    if bool(get_by_path(cfg, "runtime.require_no_cpu_disk_offload", False)):
+        backbone._stage_pair_device_report = assert_no_cpu_disk_offload(backbone)
     source = str(get_by_path(cfg, "backbone.source", "base"))
     frozen = bool(get_by_path(cfg, "backbone.frozen", True))
     if source == "existing_lora":
         backbone = _load_existing_adapter(backbone, cfg, is_trainable=not frozen)
-    elif source == "base" and not frozen:
+    elif source == "base" and (
+        not frozen
+        or (
+            int(get_by_path(cfg, "checkpoint.format_version", 1)) == 2
+            and bool(get_by_path(cfg, "lora.enabled", False))
+        )
+    ):
         backbone = apply_lora_if_enabled(backbone, backbone_cfg)
     elif source != "base":
         raise ValueError(f"Unsupported backbone.source: {source}")
@@ -277,115 +325,50 @@ def build_stage_pair_model_from_config(cfg: dict[str, Any], *, live_backbone: bo
     return model, processor
 
 
-def save_stage_pair_checkpoint(
-    path: str | Path,
-    model: nn.Module,
-    cfg: dict[str, Any],
-    metrics: dict[str, Any],
-    *,
-    processor: Any | None = None,
-    optimizer: Any | None = None,
-    scheduler: Any | None = None,
-    extra: dict[str, Any] | None = None,
-    minimal: bool = False,
-) -> None:
-    model = unwrap_model(model)
-    ckpt = Path(path)
-    if ckpt.exists():
-        shutil.rmtree(ckpt)
-    ckpt.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "set_encoder": model.set_encoder.state_dict(),
-            "stage_head": model.stage_head.state_dict(),
-            "pair_head": None if model.pair_head is None else model.pair_head.state_dict(),
-            "hidden_size": int(model.hidden_size),
-            "model_dim": int(model.model_dim),
-            "metrics": metrics,
-        },
-        ckpt / "heads.pt",
-    )
-    backbone = getattr(model, "backbone", None)
-    if backbone is not None and hasattr(backbone, "save_pretrained"):
-        try:
-            backbone.save_pretrained(ckpt / "adapter")
-        except Exception:
-            pass
-    if processor is not None and hasattr(processor, "save_pretrained"):
-        try:
-            processor.save_pretrained(ckpt / "processor")
-        except Exception:
-            pass
-    write_json(ckpt / "config.json", cfg)
-    write_json(ckpt / "metrics.json", metrics)
-    write_json(ckpt / "permutations.json", {"perms": [list(p) for p in PERMS]})
-    if extra:
-        write_json(ckpt / "extra.json", extra)
-    if not minimal:
-        state: dict[str, Any] = {}
-        if optimizer is not None:
-            state["optimizer"] = optimizer.state_dict()
-        if scheduler is not None:
-            state["scheduler"] = scheduler.state_dict()
-        if state:
-            torch.save(state, ckpt / "training_state.pt")
-
-
-def _adapter_names(backbone: nn.Module, fallback: str) -> list[str]:
-    active = getattr(backbone, "active_adapters", None)
-    if isinstance(active, (list, tuple)) and active:
-        return [str(v) for v in active]
-    active_one = getattr(backbone, "active_adapter", None)
-    if isinstance(active_one, str) and active_one:
-        return [active_one]
-    return [fallback]
-
-
-def _align_lora_adapter_devices(backbone: nn.Module, adapter_name: str = "stage_pair") -> None:
-    names = set(_adapter_names(backbone, adapter_name))
-    names.add(adapter_name)
-    for module in backbone.modules():
-        weight = getattr(module, "weight", None)
-        device = getattr(weight, "device", None)
-        if device is None:
-            continue
-        for attr in ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B"):
-            adapters = getattr(module, attr, None)
-            if adapters is None:
-                continue
-            for name in names:
-                if name in adapters:
-                    adapters[name].to(device)
-
-
-def load_stage_pair_checkpoint(path: str | Path, model: nn.Module, *, strict: bool = True, is_trainable: bool = False) -> tuple[nn.Module, dict[str, Any]]:
-    model = unwrap_model(model)
-    ckpt = Path(path)
-    adapter_dir = ckpt / "adapter"
-    loaded_adapter_name = "stage_pair"
-    if adapter_dir.exists() and getattr(model, "backbone", None) is not None:
-        try:
-            if hasattr(model.backbone, "load_adapter"):
-                model.backbone.load_adapter(str(adapter_dir), adapter_name=loaded_adapter_name, is_trainable=is_trainable)
-                if hasattr(model.backbone, "set_adapter"):
-                    model.backbone.set_adapter(loaded_adapter_name)
-            else:
-                from peft import PeftModel
-
-                model.backbone = PeftModel.from_pretrained(model.backbone, str(adapter_dir), is_trainable=is_trainable)
-                loaded_adapter_name = "default"
-            _align_lora_adapter_devices(model.backbone, loaded_adapter_name)
-        except Exception as exc:
-            raise RuntimeError(f"Failed to load stage-pair adapter from {adapter_dir}") from exc
-    payload = torch.load(ckpt / "heads.pt", map_location="cpu")
-    model.set_encoder.load_state_dict(payload["set_encoder"], strict=strict)
-    model.stage_head.load_state_dict(payload["stage_head"], strict=strict)
-    if model.pair_head is not None and payload.get("pair_head") is not None:
-        model.pair_head.load_state_dict(payload["pair_head"], strict=strict)
-    return model, payload
-
-
 def write_stage_pair_trainable_report(path: str | Path, model: nn.Module) -> dict[str, Any]:
-    report = trainable_parameter_report(model)
+    raw = unwrap_model(model)
+    report = trainable_parameter_report(raw)
+    backbone = getattr(raw, "backbone", None)
+    manifest = getattr(backbone, "_stage_pair_lora_target_manifest", None)
+    summary = lora_target_summary(manifest) if isinstance(manifest, list) else {
+        "groups": {},
+        "text_full_attention_match_count": 0,
+        "text_linear_attention_match_count": 0,
+        "vision_match_count": 0,
+        "lora_trainable_parameter_count": 0,
+    }
+    visual_base_parameters = 0
+    vision_trainable_parameters = 0
+    base_model_parameters = 0
+    backbone_parameters = 0
+    if backbone is not None:
+        for name, parameter in backbone.named_parameters():
+            count = int(parameter.numel())
+            lowered = name.lower()
+            backbone_parameters += count
+            if "lora_" not in lowered:
+                base_model_parameters += count
+            if any(marker in lowered for marker in ("visual", "vision", "image")):
+                if "lora_" in lowered and parameter.requires_grad:
+                    vision_trainable_parameters += count
+                elif "lora_" not in lowered:
+                    visual_base_parameters += count
+                    if parameter.requires_grad:
+                        raise RuntimeError(f"Visual base parameter is unexpectedly trainable: {name}")
+    report.update(summary)
+    report.update(
+        {
+            "base_model_total_parameters": base_model_parameters,
+            "backbone_parameter_total": backbone_parameters,
+            "trainable_parameter_total": int(report["trainable"]),
+            "frozen_visual_base_parameter_count": visual_base_parameters,
+            "vision_trainable_parameter_count": vision_trainable_parameters,
+            "actual_device_map": getattr(backbone, "_stage_pair_device_report", {}).get("actual_device_map", {}),
+            "parameter_devices": getattr(backbone, "_stage_pair_device_report", {}).get("parameter_devices", []),
+            "cpu_or_disk_offload": getattr(backbone, "_stage_pair_device_report", {}).get(
+                "cpu_or_disk_offload", False
+            ),
+        }
+    )
     write_json(path, report)
     return report

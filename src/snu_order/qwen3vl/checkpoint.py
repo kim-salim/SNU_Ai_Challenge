@@ -64,15 +64,9 @@ def save_lora24_checkpoint(
     )
     backbone = getattr(model, "backbone", None)
     if backbone is not None and hasattr(backbone, "save_pretrained"):
-        try:
-            backbone.save_pretrained(ckpt_dir / "adapter")
-        except Exception:
-            pass
+        backbone.save_pretrained(ckpt_dir / "adapter")
     if processor is not None and hasattr(processor, "save_pretrained"):
-        try:
-            processor.save_pretrained(ckpt_dir / "processor")
-        except Exception:
-            pass
+        processor.save_pretrained(ckpt_dir / "processor")
     write_json(ckpt_dir / "config.json", cfg)
     write_json(ckpt_dir / "metrics.json", metrics)
     write_json(ckpt_dir / "permutations.json", {"perms": [list(perm) for perm in PERMS]})

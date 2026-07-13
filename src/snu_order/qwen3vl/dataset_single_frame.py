@@ -17,6 +17,13 @@ from .permutations import (
     position_labels_from_answer,
     uniform_shuffle_for_sample,
 )
+from .stage_pair_prompt import (
+    LEGACY_POOLING_MODE,
+    StagePairPromptSpec,
+    build_stage_pair_message,
+    build_stage_pair_prompt,
+    prepare_stage_pair_multimodal_inputs,
+)
 
 ID_CANDIDATES = ["Id", "ID", "id", "sample_id", "sampleId"]
 SENTENCE_CANDIDATES = ["Sentence", "sentence", "text", "caption", "prompt"]
@@ -24,17 +31,21 @@ ANSWER_CANDIDATES = ["Answer", "answer", "label", "true_answer"]
 
 
 def build_single_frame_prompt(sentence: str) -> str:
-    return (
-        f"Sentence: {sentence}\n\n"
-        "This image is one of four shuffled frames sampled from the described event.\n"
-        "Represent the visual state and its relative progress within the described event.\n"
-        "STATE:"
+    return build_stage_pair_prompt(
+        sentence,
+        StagePairPromptSpec(
+            pooling_mode=LEGACY_POOLING_MODE,
+            anchor_text=None,
+            anchor_prefix="\n",
+            add_generation_prompt=True,
+            enable_thinking=None,
+            strict_template=False,
+        ),
     )
 
 
 def build_single_frame_message(prompt: str, image: Any) -> list[dict[str, Any]]:
-    image = image.convert("RGB") if hasattr(image, "convert") else image
-    return [{"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": prompt}]}]
+    return build_stage_pair_message(prompt, image)
 
 
 class Qwen3VLSingleFrameDataset:
@@ -119,10 +130,19 @@ class Qwen3VLSingleFrameCollator:
         *,
         add_generation_prompt: bool = True,
         enable_thinking: bool | None = None,
+        prompt_spec: StagePairPromptSpec | None = None,
+        model_revision: str | None = None,
     ) -> None:
         self.processor = processor
-        self.add_generation_prompt = bool(add_generation_prompt)
-        self.enable_thinking = enable_thinking
+        self.prompt_spec = prompt_spec or StagePairPromptSpec(
+            pooling_mode=LEGACY_POOLING_MODE,
+            anchor_text=None,
+            anchor_prefix="\n",
+            add_generation_prompt=bool(add_generation_prompt),
+            enable_thinking=enable_thinking,
+            strict_template=False,
+        )
+        self.model_revision = model_revision
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         if not samples:
@@ -144,21 +164,16 @@ class Qwen3VLSingleFrameCollator:
                 raise ValueError(f"Expected 4 images per sample, got {len(images)}")
             for image in images:
                 conversations.append(build_single_frame_message(str(sample["prompt"]), image))
-        template_kwargs = {
-            "tokenize": True,
-            "add_generation_prompt": self.add_generation_prompt,
-            "return_dict": True,
-            "return_tensors": "pt",
-            "padding": True,
-        }
-        if self.enable_thinking is not None:
-            template_kwargs["enable_thinking"] = bool(self.enable_thinking)
-        try:
-            inputs = self.processor.apply_chat_template(conversations, **template_kwargs)
-        except TypeError:
-            template_kwargs.pop("enable_thinking", None)
-            inputs = self.processor.apply_chat_template(conversations, **template_kwargs)
-        batch["inputs"] = dict(inputs)
+        prepared = prepare_stage_pair_multimodal_inputs(
+            self.processor,
+            conversations,
+            self.prompt_spec,
+            model_revision=self.model_revision,
+        )
+        batch["inputs"] = prepared.inputs
+        if prepared.anchor_mask is not None:
+            batch["anchor_mask"] = prepared.anchor_mask
+            batch["anchor_spans"] = prepared.anchor_spans
         return batch
 
 

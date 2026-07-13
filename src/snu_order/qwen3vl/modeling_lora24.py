@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
+import inspect
 import os
 import warnings
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,14 @@ from torch import nn
 
 from snu_order.utils.config import get_by_path
 from snu_order.utils.io import write_json
+
+from .lora_targets import (
+    assert_no_cpu_disk_offload,
+    discover_qwen35_lora_targets,
+    enforce_lora_trainability,
+    finalize_peft_lora_manifest,
+    is_structured_lora_config,
+)
 
 
 def torch_dtype_from_string(value: str | None) -> torch.dtype | None:
@@ -241,8 +248,10 @@ def _disable_deepstack_visual_features_if_needed(model: nn.Module, cfg: dict[str
         if hasattr(module, "deepstack_visual_indexes"):
             try:
                 module.deepstack_visual_indexes = []
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to disable deepstack_visual_indexes on {module.__class__.__name__}"
+                ) from exc
         module_cfg = getattr(module, "config", None)
         vision_cfg = getattr(module_cfg, "vision_config", None)
         if vision_cfg is not None and hasattr(vision_cfg, "deepstack_visual_indexes"):
@@ -251,16 +260,20 @@ def _disable_deepstack_visual_features_if_needed(model: nn.Module, cfg: dict[str
             module_cfg.deepstack_visual_indexes = []
 
 
-def _module_tail(name: str) -> str:
-    return name.rsplit(".", 1)[-1]
-
-
-def matching_lora_module_names(model: nn.Module, target_modules: Iterable[str]) -> list[str]:
+def matching_language_lora_module_names(model: nn.Module, target_modules: list[str]) -> list[str]:
     targets = {str(item) for item in target_modules}
     names: list[str] = []
     for name, module in model.named_modules():
-        if _module_tail(name) in targets and hasattr(module, "weight"):
-            names.append(name)
+        if ".language_model.layers." not in name or not hasattr(module, "weight"):
+            continue
+        for target in targets:
+            if "." in target:
+                matched = name == target or name.endswith(f".{target}")
+            else:
+                matched = name.endswith(f".self_attn.{target}")
+            if matched:
+                names.append(name)
+                break
     return names
 
 
@@ -268,7 +281,7 @@ def _freeze_vision_parameters(model: nn.Module) -> None:
     vision_markers = ("visual", "vision", "vision_tower", "image_tower", "image_encoder")
     for name, parameter in model.named_parameters():
         lowered = name.lower()
-        if any(marker in lowered for marker in vision_markers):
+        if any(marker in lowered for marker in vision_markers) and "lora_" not in lowered:
             parameter.requires_grad = False
 
 
@@ -280,10 +293,37 @@ def apply_lora_if_enabled(backbone: nn.Module, cfg: dict[str, Any]) -> nn.Module
     except ImportError as exc:
         raise ImportError("QLoRA training requires peft") from exc
 
-    target_modules = list(get_by_path(cfg, "lora.target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]))
-    matches = matching_lora_module_names(backbone, target_modules)
-    if not matches:
-        raise ValueError(f"No LoRA target modules matched {target_modules}")
+    structured_manifest: list[dict[str, Any]] | None = None
+    rank_pattern: dict[str, int] | None = None
+    alpha_pattern: dict[str, int] | None = None
+    if is_structured_lora_config(cfg):
+        parameters = inspect.signature(LoraConfig).parameters
+        missing_features = [name for name in ("rank_pattern", "alpha_pattern") if name not in parameters]
+        if missing_features:
+            try:
+                import peft
+
+                peft_version = getattr(peft, "__version__", "unknown")
+            except ImportError:
+                peft_version = "unavailable"
+            raise RuntimeError(
+                f"Installed PEFT {peft_version} lacks required LoraConfig fields: {missing_features}"
+            )
+        structured_manifest = discover_qwen35_lora_targets(backbone, cfg)
+        target_modules = [str(entry["module_name"]) for entry in structured_manifest]
+        rank_pattern = {str(entry["module_name"]): int(entry["rank"]) for entry in structured_manifest}
+        alpha_pattern = {str(entry["module_name"]): int(entry["alpha"]) for entry in structured_manifest}
+        lora_rank = int(get_by_path(cfg, "lora.full_attention.rank"))
+        lora_alpha = int(get_by_path(cfg, "lora.full_attention.alpha"))
+        lora_dropout = float(get_by_path(cfg, "lora.full_attention.dropout"))
+    else:
+        requested = list(get_by_path(cfg, "lora.target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]))
+        target_modules = matching_language_lora_module_names(backbone, requested)
+        if not target_modules:
+            raise ValueError(f"No exact language-backbone LoRA targets matched {requested}")
+        lora_rank = int(get_by_path(cfg, "lora.rank", 16))
+        lora_alpha = int(get_by_path(cfg, "lora.alpha", 32))
+        lora_dropout = float(get_by_path(cfg, "lora.dropout", 0.05))
 
     if bool(get_by_path(cfg, "quantization.enabled", True)):
         backbone = prepare_model_for_kbit_training(
@@ -292,20 +332,32 @@ def apply_lora_if_enabled(backbone: nn.Module, cfg: dict[str, Any]) -> nn.Module
         )
     for parameter in backbone.parameters():
         parameter.requires_grad = False
-    lora_cfg = LoraConfig(
-        r=int(get_by_path(cfg, "lora.rank", 16)),
-        lora_alpha=int(get_by_path(cfg, "lora.alpha", 32)),
-        target_modules=target_modules,
-        lora_dropout=float(get_by_path(cfg, "lora.dropout", 0.05)),
-        bias=str(get_by_path(cfg, "lora.bias", "none")),
-        task_type="CAUSAL_LM",
-    )
+    lora_kwargs: dict[str, Any] = {
+        "r": lora_rank,
+        "lora_alpha": lora_alpha,
+        "target_modules": target_modules,
+        "lora_dropout": lora_dropout,
+        "bias": str(get_by_path(cfg, "lora.bias", "none")),
+        "task_type": "CAUSAL_LM",
+    }
+    if rank_pattern is not None and alpha_pattern is not None:
+        lora_kwargs["rank_pattern"] = rank_pattern
+        lora_kwargs["alpha_pattern"] = alpha_pattern
+    lora_cfg = LoraConfig(**lora_kwargs)
     backbone = get_peft_model(backbone, lora_cfg)
-    if bool(get_by_path(cfg, "model.freeze_vision_encoder", True)):
+    if structured_manifest is not None:
+        enforce_lora_trainability(backbone, structured_manifest)
+    elif bool(get_by_path(cfg, "model.freeze_vision_encoder", True)):
         _freeze_vision_parameters(backbone)
     trainable_matches = [name for name, param in backbone.named_parameters() if param.requires_grad]
     if not trainable_matches:
         raise ValueError("LoRA is enabled but no backbone parameters are trainable")
+    if structured_manifest is not None:
+        finalized_manifest, summary = finalize_peft_lora_manifest(backbone, structured_manifest)
+        backbone._stage_pair_lora_target_manifest = finalized_manifest
+        backbone._stage_pair_lora_target_summary = summary
+    if bool(get_by_path(cfg, "runtime.require_no_cpu_disk_offload", False)):
+        backbone._stage_pair_device_report = assert_no_cpu_disk_offload(backbone)
     return backbone
 
 

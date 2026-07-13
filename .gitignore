@@ -3,6 +3,9 @@ data/raw/
 data/features/
 
 # model weights
+weights/**
+!weights/README.md
+!weights/registry.yaml
 weights/pretrained/
 weights/heads/
 *.pt
@@ -12,8 +15,14 @@ weights/heads/
 *.bin
 
 # outputs
+outputs/
 outputs/experiments/
 outputs/submissions/*.csv
+logs/
+.hf-cache/
+.cache/
+.triton/
+.nv/
 
 # python cache
 __pycache__/
@@ -28,4 +37,3 @@ __pycache__/
 .venv/
 venv/
 wandb/
-

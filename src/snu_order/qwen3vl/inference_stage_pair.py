@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +15,18 @@ from snu_order.data.validate_submission import find_column, validate_submission
 from snu_order.pipeline.make_submission import save_submission
 from snu_order.utils.config import get_by_path, load_config
 from snu_order.utils.io import read_csv_rows
+from snu_order.utils.seed import seed_everything
 from snu_order.vlm24.image_builder import load_sample_frames
 
+from .calibration_stage_pair import calibrated_structured_logits, load_calibration
 from .dataset_single_frame import build_single_frame_message, build_single_frame_prompt
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
 from .permutations import perm_index_to_answer, validate_perm_index
+from .stage_pair_prompt import (
+    PreparedStagePairInputs,
+    StagePairPromptSpec,
+    prepare_stage_pair_multimodal_inputs,
+)
 from .train_lora24 import _model_device
 
 
@@ -46,28 +55,19 @@ def _prepare_inputs(
     processor: Any,
     prompt: str,
     frames: list[Any],
-    device: torch.device | str,
     *,
-    enable_thinking: bool | None = None,
-) -> dict[str, Any]:
+    spec: StagePairPromptSpec,
+    model_revision: str | None,
+) -> PreparedStagePairInputs:
     if len(frames) != 4:
         raise ValueError(f"Expected 4 frames, got {len(frames)}")
     conversations = [build_single_frame_message(prompt, frame) for frame in frames]
-    template_kwargs = {
-        "tokenize": True,
-        "add_generation_prompt": True,
-        "return_dict": True,
-        "return_tensors": "pt",
-        "padding": True,
-    }
-    if enable_thinking is not None:
-        template_kwargs["enable_thinking"] = bool(enable_thinking)
-    try:
-        inputs = processor.apply_chat_template(conversations, **template_kwargs)
-    except TypeError:
-        template_kwargs.pop("enable_thinking", None)
-        inputs = processor.apply_chat_template(conversations, **template_kwargs)
-    return _tensor_inputs_to_device(dict(inputs), device)
+    return prepare_stage_pair_multimodal_inputs(
+        processor,
+        conversations,
+        spec,
+        model_revision=model_revision,
+    )
 
 
 def predict_rows(
@@ -78,17 +78,26 @@ def predict_rows(
     image_root: str | Path,
     max_samples: int = -1,
     device_index: int = 0,
+    calibration_path: str | Path | None = None,
 ) -> tuple[list[str], list[list[int]], list[dict[str, Any]]]:
+    seed_everything(int(get_by_path(cfg, "experiment.seed", 42)))
     rows = read_csv_rows(metadata_csv)
     id_col, sentence_col = _detect_columns(rows, metadata_csv)
     if max_samples is not None and int(max_samples) >= 0:
         rows = rows[: int(max_samples)]
 
-    cfg.setdefault("backbone", {})["frozen"] = True
-    cfg.setdefault("backbone", {})["device_map"] = {"": int(device_index)}
-    cfg.setdefault("lora", {})["enabled"] = False
-    model, processor = build_stage_pair_model_from_config(cfg, live_backbone=True)
-    model, _ = load_stage_pair_checkpoint(checkpoint, model, strict=False, is_trainable=False)
+    runtime_cfg = deepcopy(cfg)
+    runtime_cfg.setdefault("backbone", {})["frozen"] = True
+    runtime_cfg.setdefault("backbone", {})["device_map"] = {"": int(device_index)}
+    model, processor = build_stage_pair_model_from_config(runtime_cfg, live_backbone=True)
+    model, _ = load_stage_pair_checkpoint(
+        checkpoint,
+        model,
+        strict=True,
+        is_trainable=False,
+        cfg=runtime_cfg,
+        processor=processor,
+    )
     device = _model_device(model)
     model.set_encoder.to(device)
     model.stage_head.to(device)
@@ -99,12 +108,14 @@ def predict_rows(
     ids: list[str] = []
     answers: list[list[int]] = []
     debug_rows: list[dict[str, Any]] = []
+    calibration = load_calibration(calibration_path) if calibration_path is not None else None
+    spec = StagePairPromptSpec.from_config(runtime_cfg)
+    model_revision = str(get_by_path(runtime_cfg, "backbone.revision", "")) or None
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
     with torch.no_grad():
-        enable_thinking = get_by_path(cfg, "prompt.enable_thinking", None)
         for idx, row in enumerate(rows):
             sample_id = str(row[id_col])
             try:
@@ -113,14 +124,27 @@ def predict_rows(
                 raise RuntimeError(f"Failed to load frames for sample id={sample_id}") from exc
 
             prompt = build_single_frame_prompt(str(row[sentence_col]))
-            inputs = _prepare_inputs(processor, prompt, frames, device, enable_thinking=enable_thinking)
+            prepared = _prepare_inputs(
+                processor,
+                prompt,
+                frames,
+                spec=spec,
+                model_revision=model_revision,
+            )
+            inputs = _tensor_inputs_to_device(prepared.inputs, device)
+            anchor_mask = None if prepared.anchor_mask is None else prepared.anchor_mask.to(device)
             start = time.perf_counter()
-            outputs = model(inputs=inputs, batch_size=1)
+            outputs = model(inputs=inputs, batch_size=1, anchor_mask=anchor_mask)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             latency = time.perf_counter() - start
 
-            scores = outputs["final_logits"].detach().float().cpu()[0]
+            if calibration is None:
+                scores = outputs["final_logits"].detach().float().cpu()[0]
+            else:
+                scores = calibrated_structured_logits(
+                    outputs["stage_logits"], outputs["pair_logits"], calibration
+                ).detach().float().cpu()[0]
             pred_perm_idx = validate_perm_index(int(scores.argmax().item()))
             answer = perm_index_to_answer(pred_perm_idx)
             top2 = torch.topk(scores, k=2)
@@ -165,10 +189,13 @@ def main() -> None:
     parser.add_argument("--debug-csv", default=None)
     parser.add_argument("--max-samples", type=int, default=-1)
     parser.add_argument("--device-index", type=int, default=0)
+    parser.add_argument("--calibration", default=None)
+    parser.add_argument("--profile-json", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     image_root = args.image_root or str(get_by_path(cfg, "data.image_root", "data/raw"))
+    wall_start = time.perf_counter()
     ids, answers, debug_rows = predict_rows(
         cfg=cfg,
         checkpoint=args.checkpoint,
@@ -176,11 +203,31 @@ def main() -> None:
         image_root=image_root,
         max_samples=args.max_samples,
         device_index=args.device_index,
+        calibration_path=args.calibration,
     )
     save_submission(ids, answers, args.output_csv)
     validate_submission(args.output_csv, args.sample_submission)
     if args.debug_csv:
         write_debug_csv(args.debug_csv, debug_rows)
+    wall_time = time.perf_counter() - wall_start
+    latencies = [float(row["latency_sec"]) for row in debug_rows]
+    ordered = sorted(latencies)
+    p95_index = max(0, min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)) if ordered else 0
+    forward_time = sum(latencies)
+    profile = {
+        "sample_count": len(debug_rows),
+        "peak_vram_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
+        "model_forward_time_sec": forward_time,
+        "end_to_end_wall_clock_sec": wall_time,
+        "mean_sample_latency_sec": forward_time / max(len(latencies), 1),
+        "p95_sample_latency_sec": ordered[p95_index] if ordered else 0.0,
+        "estimated_full_test_runtime_sec": wall_time,
+    }
+    if args.profile_json:
+        from snu_order.utils.io import write_json
+
+        write_json(args.profile_json, profile)
+    print(json.dumps({"profile": profile}, ensure_ascii=False))
     print(f"saved submission: {args.output_csv}")
 
 
