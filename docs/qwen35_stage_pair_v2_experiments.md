@@ -67,6 +67,18 @@ bash scripts/run_qwen35_9b_stage_pair_v2_text_anchor.sh
 bash scripts/run_qwen35_9b_stage_pair_v2_text_anchor_submission.sh
 ```
 
+To run training, strict checkpoint verification, valid-A calibration, test inference,
+and submission validation as one fail-fast pipeline, use:
+
+```bash
+bash scripts/run_qwen35_9b_stage_pair_v2_text_anchor_end_to_end.sh
+```
+
+The end-to-end wrapper starts submission inference only after every training-side
+step succeeds. `TRAIN_MAX_SAMPLES` and `SUBMISSION_MAX_SAMPLES` are separate to avoid
+accidentally producing a partial submission. It rejects `SMOKE=1`; smoke runs never
+read test data.
+
 Optional one-time lockbox evaluation:
 
 ```bash
