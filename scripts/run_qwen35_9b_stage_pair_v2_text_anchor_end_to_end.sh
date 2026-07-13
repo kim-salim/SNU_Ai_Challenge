@@ -46,7 +46,7 @@ if [[ "$USE_DOCKER" == "1" && "$SNU_E1_IN_CONTAINER" != "1" && ! -f /.dockerenv 
     --network none
     --user "$(id -u):$(id -g)"
     --volume "$HOST_REPO_ROOT:$HOST_REPO_ROOT"
-    --volume "$HOST_DATA_DIR:$HOST_DATA_DIR:ro"
+    --volume "$HOST_DATA_DIR:$ROOT_DIR/data:ro"
     --workdir "$ROOT_DIR"
     --env HOME=/tmp
     --env "HF_HOME=$HOST_HF_HOME"
@@ -86,6 +86,15 @@ if ! "$PYTHON_BIN" -c 'import accelerate, bitsandbytes, peft, torch, transformer
   echo "Use the default Docker path or set PYTHON_BIN to the pinned environment."
   exit 1
 fi
+
+for required_input in \
+  data/splits/ab_v1/train_ab_v1.csv \
+  data/splits/ab_v1/valid_a_v1.csv; do
+  if [[ ! -f "$required_input" ]]; then
+    echo "Required training input is not mounted: $ROOT_DIR/$required_input"
+    exit 1
+  fi
+done
 
 TRAIN_SCRIPT="$ROOT_DIR/scripts/run_qwen35_9b_stage_pair_v2_text_anchor.sh"
 SUBMISSION_SCRIPT="$ROOT_DIR/scripts/run_qwen35_9b_stage_pair_v2_text_anchor_submission.sh"
