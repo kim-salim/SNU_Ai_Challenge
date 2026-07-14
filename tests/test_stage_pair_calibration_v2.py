@@ -10,6 +10,7 @@ from snu_order.qwen3vl.calibration_stage_pair import (
     REQUIRED_BINDING_KEYS,
     _comparison,
     assign_id_hash_folds,
+    checkpoint_calibration_bindings,
     load_calibration,
     permutation_table_fingerprint,
     run_calibration,
@@ -137,3 +138,34 @@ def test_bound_calibration_rejects_wrong_checkpoint_binding(tmp_path):
     wrong["heads_sha256"] = "wrong"
     with pytest.raises(RuntimeError, match="artifact mismatch"):
         load_calibration(tmp_path / "calibration.json", expected_bindings=wrong)
+
+
+def test_checkpoint_calibration_bindings_hash_every_required_artifact(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    files = {
+        "checkpoint_manifest.json": b"manifest",
+        "adapter/adapter_model.safetensors": b"adapter",
+        "heads.pt": b"heads",
+        "prompt_fingerprint.json": b"prompt",
+        "processor/tokenizer_config.json": b"processor",
+        "permutations.json": b"permutations",
+    }
+    for relative, payload in files.items():
+        path = checkpoint / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    valid_split = tmp_path / "valid_a.csv"
+    valid_split.write_bytes(b"valid")
+    bindings = checkpoint_calibration_bindings(
+        checkpoint,
+        {"data": {"valid_split": str(valid_split)}},
+    )
+    assert set(bindings) == REQUIRED_BINDING_KEYS
+    assert all(len(value) == 64 for value in bindings.values())
+
+    (checkpoint / "adapter" / "adapter_model.bin").write_bytes(b"duplicate")
+    with pytest.raises(RuntimeError, match="exactly one adapter"):
+        checkpoint_calibration_bindings(
+            checkpoint,
+            {"data": {"valid_split": str(valid_split)}},
+        )

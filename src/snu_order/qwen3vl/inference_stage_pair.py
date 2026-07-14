@@ -18,7 +18,11 @@ from snu_order.utils.io import read_csv_rows
 from snu_order.utils.seed import seed_everything
 from snu_order.vlm24.image_builder import load_sample_frames
 
-from .calibration_stage_pair import calibrated_structured_logits, load_calibration
+from .calibration_stage_pair import (
+    calibrated_structured_logits,
+    checkpoint_calibration_bindings,
+    load_calibration,
+)
 from .dataset_single_frame import build_single_frame_message, build_single_frame_prompt
 from .frame_chunking import normalize_frame_chunk_size
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
@@ -116,7 +120,14 @@ def predict_rows(
     ids: list[str] = []
     answers: list[list[int]] = []
     debug_rows: list[dict[str, Any]] = []
-    calibration = load_calibration(calibration_path) if calibration_path is not None else None
+    calibration = (
+        load_calibration(
+            calibration_path,
+            expected_bindings=checkpoint_calibration_bindings(checkpoint, runtime_cfg),
+        )
+        if calibration_path is not None
+        else None
+    )
     spec = StagePairPromptSpec.from_config(runtime_cfg)
     model_revision = str(get_by_path(runtime_cfg, "backbone.revision", "")) or None
     chunk_size = normalize_frame_chunk_size(

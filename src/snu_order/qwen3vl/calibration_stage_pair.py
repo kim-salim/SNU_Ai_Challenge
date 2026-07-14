@@ -603,6 +603,42 @@ def artifact_bindings_from_paths(values: Iterable[str]) -> dict[str, str]:
     return {key: file_sha256(path) for key, path in paths.items()}
 
 
+def checkpoint_calibration_bindings(
+    checkpoint: str | Path,
+    cfg: dict[str, Any],
+) -> dict[str, str]:
+    """Recompute every checkpoint/calibration binding used by inference."""
+    root = Path(checkpoint)
+    adapter_candidates = [
+        root / "adapter" / "adapter_model.safetensors",
+        root / "adapter" / "adapter_model.bin",
+    ]
+    adapters = [path for path in adapter_candidates if path.is_file()]
+    if len(adapters) != 1:
+        raise RuntimeError(
+            "Expected exactly one adapter weight file while binding calibration, "
+            f"found {[str(path) for path in adapters]}"
+        )
+    paths = {
+        "checkpoint_manifest_sha256": root / "checkpoint_manifest.json",
+        "adapter_sha256": adapters[0],
+        "heads_sha256": root / "heads.pt",
+        "prompt_fingerprint_sha256": root / "prompt_fingerprint.json",
+        "processor_fingerprint_sha256": root / "processor" / "tokenizer_config.json",
+        "permutation_mapping_sha256": root / "permutations.json",
+        "validation_split_sha256": Path(str(get_by_path(cfg, "data.valid_split"))),
+        "scorer_code_sha256": Path(__file__).with_name("stage_pair_scorer.py"),
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Cannot verify calibration/checkpoint binding; required files are missing: {missing}"
+        )
+    if set(paths) != REQUIRED_BINDING_KEYS:
+        raise AssertionError("Runtime calibration binding schema drifted")
+    return {key: file_sha256(path) for key, path in paths.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
