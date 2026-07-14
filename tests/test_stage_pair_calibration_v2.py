@@ -7,7 +7,9 @@ import torch
 
 from snu_order.qwen3vl.calibration_stage_pair import (
     CalibrationParameters,
+    REQUIRED_BINDING_KEYS,
     _comparison,
+    assign_id_hash_folds,
     load_calibration,
     permutation_table_fingerprint,
     run_calibration,
@@ -29,6 +31,18 @@ def _payload():
         "target_perm_idx": torch.tensor([answer_to_perm_index(answer[0].tolist())]),
         "answer": answer,
         "permutation_table_fingerprint": permutation_table_fingerprint(),
+    }
+
+
+def _multi_payload(count=50):
+    one = _payload()
+    return {
+        **one,
+        "ids": [f"sample-{index}" for index in range(count)],
+        "stage_logits": one["stage_logits"].repeat(count, 1, 1),
+        "pair_logits": one["pair_logits"].repeat(count, 1),
+        "target_perm_idx": one["target_perm_idx"].repeat(count),
+        "answer": one["answer"].repeat(count, 1),
     }
 
 
@@ -69,7 +83,7 @@ def test_raw_fixed_broken_counts_are_exact():
 
 def test_calibration_serialization_round_trip(tmp_path):
     result = run_calibration(
-        _payload(),
+        _multi_payload(),
         tmp_path,
         tune_split="valid_a",
         pair_weights=[0.0, 0.3],
@@ -90,5 +104,36 @@ def test_calibration_serialization_round_trip(tmp_path):
         "calibrated_valid_predictions.csv",
         "calibrated_wrong_cases.csv",
         "raw_vs_calibrated_comparison.json",
+        "oof_metrics.json",
+        "fold_calibration.json",
+        "fold_assignments.json",
+        "oof_valid_predictions.csv",
+        "fixed_calibration_diagnostic.json",
     ):
         assert (tmp_path / filename).is_file()
+
+
+def test_id_hash_folds_are_deterministic_and_not_order_dependent():
+    ids = [f"id-{index}" for index in range(50)]
+    first = dict(zip(ids, assign_id_hash_folds(ids), strict=True))
+    second = dict(zip(reversed(ids), assign_id_hash_folds(reversed(ids)), strict=True))
+    assert first == second
+    assert set(first.values()) == {0, 1, 2, 3, 4}
+
+
+def test_bound_calibration_rejects_wrong_checkpoint_binding(tmp_path):
+    bindings = {key: f"hash-{key}" for key in REQUIRED_BINDING_KEYS}
+    run_calibration(
+        _multi_payload(),
+        tmp_path,
+        tune_split="valid_a",
+        pair_weights=[0.3],
+        stage_temperatures=[1.0],
+        pair_temperatures=[1.0],
+        artifact_bindings=bindings,
+    )
+    assert load_calibration(tmp_path / "calibration.json", expected_bindings=bindings)
+    wrong = dict(bindings)
+    wrong["heads_sha256"] = "wrong"
+    with pytest.raises(RuntimeError, match="artifact mismatch"):
+        load_calibration(tmp_path / "calibration.json", expected_bindings=wrong)

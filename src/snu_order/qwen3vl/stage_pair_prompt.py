@@ -43,7 +43,13 @@ class StagePairPromptSpec:
                 get_by_path(cfg, "prompt.add_generation_prompt", pooling_mode == LEGACY_POOLING_MODE)
             ),
             enable_thinking=get_by_path(cfg, "prompt.enable_thinking", None),
-            strict_template=bool(get_by_path(cfg, "prompt.strict_template", False)),
+            strict_template=bool(
+                get_by_path(
+                    cfg,
+                    "prompt.strict_template",
+                    get_by_path(cfg, "prompt.require_exact_template", False),
+                )
+            ),
         )
         spec.validate()
         return spec
@@ -53,8 +59,8 @@ class StagePairPromptSpec:
             raise RuntimeError("prompt.enable_thinking must be a boolean or null")
         if self.pooling_mode != ANCHOR_POOLING_MODE:
             return
-        if self.anchor_text != E1_ANCHOR_TEXT:
-            raise RuntimeError(f"E1 anchor text must be exactly {E1_ANCHOR_TEXT!r}")
+        if self.anchor_text is None or not self.anchor_text:
+            raise RuntimeError("anchor_span_mean requires a nonempty prompt.anchor_text")
         if self.add_generation_prompt:
             raise RuntimeError("anchor_span_mean requires prompt.add_generation_prompt=false")
         if self.enable_thinking is not False:
@@ -78,8 +84,8 @@ def build_stage_pair_prompt(sentence: str, spec: StagePairPromptSpec) -> str:
     return (
         f"Sentence: {sentence}\n\n"
         "This image is one of four shuffled frames sampled from the described event.\n"
-        "Represent the visual state and its relative progress within the described event.\n"
-        f"{anchor}"
+        "Represent the visual state and its relative progress within the described event."
+        f"{spec.anchor_prefix}{anchor}"
     )
 
 
@@ -351,7 +357,41 @@ def _package_version(name: str) -> str:
         return "unavailable"
 
 
-def build_prompt_fingerprint(cfg: dict[str, Any], processor: Any) -> dict[str, Any]:
+def _tokenizer_config_v1(tokenizer: Any) -> dict[str, Any]:
+    return {
+        "class": tokenizer.__class__.__name__,
+        "init_kwargs": getattr(tokenizer, "init_kwargs", {}),
+        "special_tokens_map": getattr(tokenizer, "special_tokens_map", {}),
+        "padding_side": getattr(tokenizer, "padding_side", None),
+        "vocab_size": getattr(tokenizer, "vocab_size", None),
+    }
+
+
+def _tokenizer_config_v2(tokenizer: Any) -> dict[str, Any]:
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
+    vocab = get_vocab() if callable(get_vocab) else None
+    added_vocab = get_added_vocab() if callable(get_added_vocab) else None
+    return {
+        "class": tokenizer.__class__.__name__,
+        "vocab": vocab,
+        "added_vocab": added_vocab,
+        "special_tokens_map": getattr(tokenizer, "special_tokens_map", {}),
+        "all_special_tokens": getattr(tokenizer, "all_special_tokens", None),
+        "all_special_ids": getattr(tokenizer, "all_special_ids", None),
+        "padding_side": getattr(tokenizer, "padding_side", None),
+        "vocab_size": getattr(tokenizer, "vocab_size", None),
+        "model_max_length": getattr(tokenizer, "model_max_length", None),
+        "clean_up_tokenization_spaces": getattr(tokenizer, "clean_up_tokenization_spaces", None),
+    }
+
+
+def build_prompt_fingerprint(
+    cfg: dict[str, Any],
+    processor: Any,
+    *,
+    format_version: int = 2,
+) -> dict[str, Any]:
     from PIL import Image
 
     spec = StagePairPromptSpec.from_config(cfg)
@@ -368,18 +408,17 @@ def build_prompt_fingerprint(cfg: dict[str, Any], processor: Any) -> dict[str, A
     chat_template = getattr(processor, "chat_template", None) or getattr(tokenizer, "chat_template", None)
     if chat_template is None:
         raise RuntimeError("Processor/tokenizer has no chat template for fingerprinting")
-    tokenizer_config = {
-        "class": tokenizer.__class__.__name__,
-        "init_kwargs": getattr(tokenizer, "init_kwargs", {}),
-        "special_tokens_map": getattr(tokenizer, "special_tokens_map", {}),
-        "padding_side": getattr(tokenizer, "padding_side", None),
-        "vocab_size": getattr(tokenizer, "vocab_size", None),
-    }
+    if int(format_version) == 1:
+        tokenizer_config = _tokenizer_config_v1(tokenizer)
+    elif int(format_version) == 2:
+        tokenizer_config = _tokenizer_config_v2(tokenizer)
+    else:
+        raise RuntimeError(f"Unsupported prompt fingerprint format: {format_version}")
     input_ids = [int(value) for value in prepared.inputs["input_ids"][0].detach().cpu().tolist()]
     tail = input_ids[-64:]
     grid = prepared.inputs.get("image_grid_thw")
     return {
-        "format_version": 1,
+        "format_version": int(format_version),
         "base_model_path": str(get_by_path(cfg, "backbone.base_model_path")),
         "model_revision": str(get_by_path(cfg, "backbone.revision")),
         "processor_class": processor.__class__.__name__,
@@ -407,6 +446,7 @@ def build_prompt_fingerprint(cfg: dict[str, Any], processor: Any) -> dict[str, A
 
 
 FINGERPRINT_COMPARISON_FIELDS = (
+    "format_version",
     "base_model_path",
     "model_revision",
     "processor_class",
@@ -422,6 +462,26 @@ FINGERPRINT_COMPARISON_FIELDS = (
     "add_generation_prompt",
     "pooling_mode",
 )
+
+
+def checkpoint_processor_path(checkpoint: str | Path) -> Path | None:
+    root = Path(checkpoint)
+    if not (root / "checkpoint_manifest.json").is_file():
+        return None
+    fingerprint_path = root / "prompt_fingerprint.json"
+    if not fingerprint_path.is_file():
+        raise RuntimeError(f"Checkpoint prompt fingerprint is missing: {fingerprint_path}")
+    fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8"))
+    version = int(fingerprint.get("format_version", 1))
+    if version == 1:
+        # v1 included absolute tokenizer file paths and must be recreated from the pinned base cache.
+        return None
+    if version == 2:
+        processor_path = root / "processor"
+        if not processor_path.is_dir():
+            raise RuntimeError(f"Checkpoint processor directory is missing: {processor_path}")
+        return processor_path
+    raise RuntimeError(f"Unsupported checkpoint prompt fingerprint format: {version}")
 
 
 def assert_prompt_fingerprint_match(saved: dict[str, Any], current: dict[str, Any]) -> None:

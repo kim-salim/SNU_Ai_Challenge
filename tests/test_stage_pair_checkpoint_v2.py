@@ -88,7 +88,7 @@ def test_v2_mock_checkpoint_round_trip(monkeypatch, tmp_path):
     fingerprint = {"input_ids_sha256": "stable"}
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: fingerprint,
+        lambda cfg, processor, **kwargs: fingerprint,
     )
     original = _model()
     with torch.no_grad():
@@ -136,7 +136,7 @@ def test_corrupt_checksum_and_missing_heads_fail(monkeypatch, tmp_path):
     fingerprint = {"input_ids_sha256": "stable"}
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: fingerprint,
+        lambda cfg, processor, **kwargs: fingerprint,
     )
     checkpoint = tmp_path / "checksum"
     save_stage_pair_checkpoint(
@@ -171,7 +171,7 @@ def test_required_artifact_without_checksum_entry_fails(monkeypatch, tmp_path):
     fingerprint = {"input_ids_sha256": "stable"}
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: fingerprint,
+        lambda cfg, processor, **kwargs: fingerprint,
     )
     checkpoint = tmp_path / "missing-checksum-entry"
     save_stage_pair_checkpoint(
@@ -197,7 +197,7 @@ def test_missing_adapter_and_strict_state_mismatch_fail(monkeypatch, tmp_path):
     fingerprint = {"input_ids_sha256": "stable"}
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: fingerprint,
+        lambda cfg, processor, **kwargs: fingerprint,
     )
     checkpoint = tmp_path / "missing-adapter"
     save_stage_pair_checkpoint(
@@ -241,7 +241,7 @@ def test_prompt_fingerprint_mismatch_fails(monkeypatch, tmp_path):
     saved_fingerprint = {"input_ids_sha256": "saved"}
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: saved_fingerprint,
+        lambda cfg, processor, **kwargs: saved_fingerprint,
     )
     checkpoint = tmp_path / "fingerprint"
     save_stage_pair_checkpoint(
@@ -255,7 +255,7 @@ def test_prompt_fingerprint_mismatch_fails(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "snu_order.qwen3vl.stage_pair_checkpoint.build_prompt_fingerprint",
-        lambda cfg, processor: {"input_ids_sha256": "runtime"},
+        lambda cfg, processor, **kwargs: {"input_ids_sha256": "runtime"},
     )
     with pytest.raises(RuntimeError, match="Prompt fingerprint mismatch"):
         verify_stage_pair_checkpoint_files(checkpoint, runtime_cfg=_cfg(False), processor=FakeProcessor())

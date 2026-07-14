@@ -10,6 +10,7 @@ from snu_order.utils.config import get_by_path
 from snu_order.utils.io import write_json
 
 from .checkpoint import unwrap_model
+from .frame_chunking import normalize_frame_chunk_size, slice_frame_multimodal_inputs
 from .lora_targets import (
     assert_no_cpu_disk_offload,
     lora_target_summary,
@@ -162,11 +163,10 @@ class Qwen3VLStagePairModel(nn.Module):
         self.stage_head = StageHead(self.model_dim, dropout=dropout)
         self.pair_head = AntiSymmetricPairwiseHead(self.model_dim, self.model_dim, dropout=dropout) if self.use_pairwise else None
 
-    def extract_frame_representations(
+    def _extract_pooled_rows(
         self,
         inputs: dict[str, Any],
         *,
-        batch_size: int,
         anchor_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.backbone is None:
@@ -197,7 +197,43 @@ class Qwen3VLStagePairModel(nn.Module):
             if anchor_mask is not None:
                 raise RuntimeError("last_non_padding pooling must not receive anchor_mask")
             pooled = self.pooler(last_hidden, attention_mask.to(last_hidden.device))
+        del outputs, hidden_states, last_hidden
+        return pooled
+
+    def extract_frame_representations(
+        self,
+        inputs: dict[str, Any],
+        *,
+        batch_size: int,
+        anchor_mask: torch.Tensor | None = None,
+        frame_chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        chunk_size = normalize_frame_chunk_size(frame_chunk_size)
         expected = int(batch_size) * 4
+        if chunk_size in {None, 4}:
+            pooled = self._extract_pooled_rows(inputs, anchor_mask=anchor_mask)
+        else:
+            if int(batch_size) != 1:
+                raise RuntimeError(
+                    "frame_chunk_size=1/2 currently requires evaluation batch_size=1 to preserve "
+                    "the exact four-frame sample boundary"
+                )
+            if anchor_mask is not None and tuple(anchor_mask.shape[:1]) != (expected,):
+                raise RuntimeError(
+                    f"anchor_mask must contain {expected} frame rows, got {tuple(anchor_mask.shape)}"
+                )
+            chunks: list[torch.Tensor] = []
+            for start in range(0, expected, chunk_size):
+                end = min(start + chunk_size, expected)
+                chunk_inputs = slice_frame_multimodal_inputs(
+                    inputs,
+                    start=start,
+                    end=end,
+                    total_frames=expected,
+                )
+                chunk_anchor = None if anchor_mask is None else anchor_mask[start:end]
+                chunks.append(self._extract_pooled_rows(chunk_inputs, anchor_mask=chunk_anchor))
+            pooled = torch.cat(chunks, dim=0)
         if pooled.shape[0] != expected:
             raise ValueError(f"Expected B*4={expected} frame representations, got {pooled.shape[0]}")
         return pooled.reshape(int(batch_size), 4, pooled.shape[-1])
@@ -209,6 +245,7 @@ class Qwen3VLStagePairModel(nn.Module):
         inputs: dict[str, Any] | None = None,
         batch_size: int | None = None,
         anchor_mask: torch.Tensor | None = None,
+        frame_chunk_size: int | None = None,
     ) -> dict[str, torch.Tensor]:
         if frame_hidden is None:
             if inputs is None or batch_size is None:
@@ -217,6 +254,7 @@ class Qwen3VLStagePairModel(nn.Module):
                 inputs,
                 batch_size=int(batch_size),
                 anchor_mask=anchor_mask,
+                frame_chunk_size=frame_chunk_size,
             )
         contextual = self.set_encoder(frame_hidden)
         stage_logits = self.stage_head(contextual)
@@ -266,18 +304,27 @@ def _load_existing_adapter(backbone: nn.Module, cfg: dict[str, Any], *, is_train
     return PeftModel.from_pretrained(backbone, str(adapter_dir), is_trainable=is_trainable)
 
 
-def build_stage_pair_model_from_config(cfg: dict[str, Any], *, live_backbone: bool) -> tuple[Qwen3VLStagePairModel, Any | None]:
+def build_stage_pair_model_from_config(
+    cfg: dict[str, Any],
+    *,
+    live_backbone: bool,
+    processor_path: str | Path | None = None,
+) -> tuple[Qwen3VLStagePairModel, Any | None]:
     if not live_backbone:
         hidden_size = int(get_by_path(cfg, "cache.hidden_size", get_by_path(cfg, "backbone.hidden_size", 4096)))
         return build_stage_pair_head_from_config(cfg, hidden_size=hidden_size, backbone=None), None
 
     processor_model_cfg = {
-        "local_dir": get_by_path(cfg, "backbone.base_model_path"),
+        "local_dir": (
+            str(processor_path)
+            if processor_path is not None
+            else get_by_path(cfg, "backbone.base_model_path")
+        ),
         "local_files_only": bool(get_by_path(cfg, "backbone.local_files_only", True)),
         "trust_remote_code": bool(get_by_path(cfg, "backbone.trust_remote_code", True)),
         "type": get_by_path(cfg, "backbone.model_type", "qwen3_vl"),
     }
-    if get_by_path(cfg, "backbone.revision", None):
+    if processor_path is None and get_by_path(cfg, "backbone.revision", None):
         processor_model_cfg["revision"] = get_by_path(cfg, "backbone.revision")
     processor = load_qwen3_processor({"model": processor_model_cfg, "processor": cfg.get("processor", {})})
     backbone_cfg = {

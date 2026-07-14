@@ -20,11 +20,13 @@ from snu_order.vlm24.image_builder import load_sample_frames
 
 from .calibration_stage_pair import calibrated_structured_logits, load_calibration
 from .dataset_single_frame import build_single_frame_message, build_single_frame_prompt
+from .frame_chunking import normalize_frame_chunk_size
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
 from .permutations import perm_index_to_answer, validate_perm_index
 from .stage_pair_prompt import (
     PreparedStagePairInputs,
     StagePairPromptSpec,
+    checkpoint_processor_path,
     prepare_stage_pair_multimodal_inputs,
 )
 from .train_lora24 import _model_device
@@ -79,6 +81,7 @@ def predict_rows(
     max_samples: int = -1,
     device_index: int = 0,
     calibration_path: str | Path | None = None,
+    frame_chunk_size: int | None = None,
 ) -> tuple[list[str], list[list[int]], list[dict[str, Any]]]:
     seed_everything(int(get_by_path(cfg, "experiment.seed", 42)))
     rows = read_csv_rows(metadata_csv)
@@ -89,7 +92,12 @@ def predict_rows(
     runtime_cfg = deepcopy(cfg)
     runtime_cfg.setdefault("backbone", {})["frozen"] = True
     runtime_cfg.setdefault("backbone", {})["device_map"] = {"": int(device_index)}
-    model, processor = build_stage_pair_model_from_config(runtime_cfg, live_backbone=True)
+    processor_path = checkpoint_processor_path(checkpoint)
+    model, processor = build_stage_pair_model_from_config(
+        runtime_cfg,
+        live_backbone=True,
+        processor_path=processor_path,
+    )
     model, _ = load_stage_pair_checkpoint(
         checkpoint,
         model,
@@ -111,11 +119,16 @@ def predict_rows(
     calibration = load_calibration(calibration_path) if calibration_path is not None else None
     spec = StagePairPromptSpec.from_config(runtime_cfg)
     model_revision = str(get_by_path(runtime_cfg, "backbone.revision", "")) or None
+    chunk_size = normalize_frame_chunk_size(
+        frame_chunk_size
+        if frame_chunk_size is not None
+        else get_by_path(runtime_cfg, "inference.frame_chunk_size", None)
+    )
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for idx, row in enumerate(rows):
             sample_id = str(row[id_col])
             try:
@@ -123,7 +136,7 @@ def predict_rows(
             except Exception as exc:
                 raise RuntimeError(f"Failed to load frames for sample id={sample_id}") from exc
 
-            prompt = build_single_frame_prompt(str(row[sentence_col]))
+            prompt = build_single_frame_prompt(str(row[sentence_col]), spec)
             prepared = _prepare_inputs(
                 processor,
                 prompt,
@@ -134,7 +147,12 @@ def predict_rows(
             inputs = _tensor_inputs_to_device(prepared.inputs, device)
             anchor_mask = None if prepared.anchor_mask is None else prepared.anchor_mask.to(device)
             start = time.perf_counter()
-            outputs = model(inputs=inputs, batch_size=1, anchor_mask=anchor_mask)
+            outputs = model(
+                inputs=inputs,
+                batch_size=1,
+                anchor_mask=anchor_mask,
+                frame_chunk_size=chunk_size,
+            )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             latency = time.perf_counter() - start
@@ -191,6 +209,7 @@ def main() -> None:
     parser.add_argument("--device-index", type=int, default=0)
     parser.add_argument("--calibration", default=None)
     parser.add_argument("--profile-json", default=None)
+    parser.add_argument("--frame-chunk-size", type=int, choices=[1, 2, 4], default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -204,6 +223,7 @@ def main() -> None:
         max_samples=args.max_samples,
         device_index=args.device_index,
         calibration_path=args.calibration,
+        frame_chunk_size=args.frame_chunk_size,
     )
     full_run = args.max_samples is None or args.max_samples < 0
     save_submission(ids, answers, args.output_csv, reference=args.sample_submission if full_run else None)
@@ -219,6 +239,12 @@ def main() -> None:
     profile = {
         "sample_count": len(debug_rows),
         "peak_vram_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
+        "peak_reserved_vram_bytes": int(torch.cuda.max_memory_reserved()) if torch.cuda.is_available() else 0,
+        "frame_chunk_size": normalize_frame_chunk_size(
+            args.frame_chunk_size
+            if args.frame_chunk_size is not None
+            else get_by_path(cfg, "inference.frame_chunk_size", None)
+        ),
         "model_forward_time_sec": forward_time,
         "end_to_end_wall_clock_sec": wall_time,
         "mean_sample_latency_sec": forward_time / max(len(latencies), 1),

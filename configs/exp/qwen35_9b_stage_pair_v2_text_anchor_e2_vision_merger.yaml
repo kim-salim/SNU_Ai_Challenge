@@ -1,0 +1,156 @@
+experiment:
+  id: qwen35_9b_stage_pair_v2_text_anchor_e2_vision_merger
+  run_id: qwen35_9b_stage_pair_v2_text_anchor_e2_vision_merger
+  seed: 42
+
+data:
+  train_split: data/splits/ab_v1/train_ab_v1.csv
+  valid_split: data/splits/ab_v1/valid_a_v1.csv
+  lockbox_split: data/splits/ab_v1/valid_b_v1.csv
+  image_root: data/raw
+  train_permutation_augmentation: true
+  permutation_probability: 1.0
+
+backbone:
+  source: base
+  base_model_path: Qwen/Qwen3.5-9B
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  model_type: qwen3_5_vl
+  existing_lora_path: weights/qwen35_9b_stage_pair_v2_text_anchor/unused_existing_lora
+  local_files_only: true
+  trust_remote_code: true
+  torch_dtype: bfloat16
+  device_map:
+    "": 0
+  frozen: false
+  disable_deepstack_visual_features: true
+  hidden_size: 4096
+
+runtime:
+  require_no_cpu_disk_offload: true
+
+processor:
+  min_pixels: null
+  max_pixels: null
+
+prompt:
+  enable_thinking: false
+  add_generation_prompt: false
+  anchor_text: "STATE:"
+  anchor_prefix: "\n"
+  strict_template: true
+
+pooling:
+  mode: anchor_span_mean
+
+attention:
+  use_flash_attention_2: false
+  fallback_to_sdpa: true
+
+quantization:
+  enabled: true
+  bits: 4
+  quant_type: nf4
+  double_quant: true
+  compute_dtype: bf16
+
+lora:
+  enabled: true
+  bias: none
+  full_attention:
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+  linear_attention:
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    modules:
+      - in_proj_qkv
+      - in_proj_z
+      - out_proj
+
+vision_merger_lora:
+  enabled: true
+  rank: 4
+  alpha: 8
+  dropout: 0.05
+  target_suffixes:
+    - visual.merger.linear_fc1
+    - visual.merger.linear_fc2
+
+model:
+  model_dim: 512
+  set_layers: 2
+  set_heads: 8
+  set_ffn_dim: 2048
+  dropout: 0.1
+  use_set_encoder: true
+  use_pairwise: true
+
+score:
+  stage_weight: 1.0
+  pair_weight: 0.3
+
+loss:
+  permutation_weight: 1.0
+  stage_weight: 0.3
+  pair_weight: 0.2
+  consistency_weight: 0.05
+
+train:
+  epochs: 4
+  epochs_frozen: 20
+  batch_size: 64
+  micro_batch_size_per_gpu: 1
+  gradient_accumulation_steps: 8
+  lora_lr: 0.00005
+  head_lr: 0.0003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  mixed_precision: bf16
+  use_grad_scaler: false
+  ddp_adjust_gradient_accumulation: true
+  ddp_find_unused_parameters: false
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  use_cache: false
+  num_workers: 0
+  early_stopping_patience: 2
+  log_interval_steps: 20
+  max_samples: -1
+
+eval:
+  batch_size: 128
+  max_samples: -1
+
+cache:
+  dir: outputs/features/qwen35_9b_stage_pair_v2_text_anchor
+  batch_size: 1
+  num_workers: 0
+
+checkpoint:
+  format_version: 2
+  strict: true
+  verify_manifest: true
+  verify_fingerprint: true
+
+calibration:
+  enabled: true
+  tune_split: valid_a
+  lockbox_tuning: false
+  pair_weight_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]
+  stage_temperature_grid: [0.8, 1.0, 1.2, 1.5]
+  pair_temperature_grid: [0.8, 1.0, 1.2, 1.5]
+
+baseline:
+  valid_predictions: outputs/experiments/qwen3vl_stage_pair/qlora_stage_pair/valid_a/valid_predictions.csv
+
+output:
+  dir: outputs/experiments/qwen35_9b_stage_pair_v2_text_anchor_e2_vision_merger
+  checkpoint_dir: weights/qwen35_9b_stage_pair_v2_text_anchor_e2_vision_merger

@@ -448,7 +448,12 @@ def verify_stage_pair_checkpoint_files(
         _assert_runtime_contract(saved_cfg, runtime_cfg)
     if processor is not None:
         saved_fingerprint = json.loads((root / "prompt_fingerprint.json").read_text(encoding="utf-8"))
-        current_fingerprint = build_prompt_fingerprint(runtime_cfg or saved_cfg, processor)
+        fingerprint_version = int(saved_fingerprint.get("format_version", 1))
+        current_fingerprint = build_prompt_fingerprint(
+            runtime_cfg or saved_cfg,
+            processor,
+            format_version=fingerprint_version,
+        )
         assert_prompt_fingerprint_match(saved_fingerprint, current_fingerprint)
     return manifest
 

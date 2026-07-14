@@ -12,6 +12,7 @@ from snu_order.qwen3vl.stage_pair_prompt import (
     apply_chat_template_strict,
     assert_prompt_fingerprint_match,
     build_prompt_fingerprint,
+    checkpoint_processor_path,
     locate_anchor_spans,
 )
 
@@ -137,6 +138,17 @@ def test_strict_template_passes_non_thinking_and_no_generation_prompt():
     assert processor.last_kwargs["add_generation_prompt"] is False
 
 
+def test_legacy_require_exact_template_alias_and_four_token_anchor_are_supported():
+    cfg = _cfg()
+    cfg["prompt"].pop("strict_template")
+    cfg["prompt"]["require_exact_template"] = True
+    cfg["prompt"]["anchor_text"] = "Temporal state representation:"
+    cfg["prompt"]["anchor_prefix"] = "\n\n"
+    spec = StagePairPromptSpec.from_config(cfg)
+    assert spec.strict_template is True
+    assert spec.anchor_text == "Temporal state representation:"
+
+
 def test_enable_thinking_type_error_becomes_runtime_error_without_fallback():
     processor = FakeProcessor(fail_template=True)
     spec = StagePairPromptSpec.from_config(_cfg())
@@ -155,3 +167,27 @@ def test_prompt_fingerprint_is_deterministic_and_mismatch_is_detected():
     changed["input_ids_sha256"] = "different"
     with pytest.raises(RuntimeError, match="Prompt fingerprint mismatch"):
         assert_prompt_fingerprint_match(first, changed)
+
+
+def test_prompt_fingerprint_v2_excludes_path_dependent_init_kwargs():
+    first_processor = FakeProcessor()
+    second_processor = FakeProcessor()
+    first_processor.tokenizer.init_kwargs = {"vocab_file": "/first/cache/vocab.json"}
+    second_processor.tokenizer.init_kwargs = {"vocab_file": "/second/cache/vocab.json"}
+    first_v2 = build_prompt_fingerprint(_cfg(), first_processor, format_version=2)
+    second_v2 = build_prompt_fingerprint(_cfg(), second_processor, format_version=2)
+    assert first_v2["tokenizer_config_sha256"] == second_v2["tokenizer_config_sha256"]
+    first_v1 = build_prompt_fingerprint(_cfg(), first_processor, format_version=1)
+    second_v1 = build_prompt_fingerprint(_cfg(), second_processor, format_version=1)
+    assert first_v1["tokenizer_config_sha256"] != second_v1["tokenizer_config_sha256"]
+
+
+def test_checkpoint_processor_selection_is_fingerprint_versioned(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    processor = checkpoint / "processor"
+    processor.mkdir(parents=True)
+    (checkpoint / "checkpoint_manifest.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "prompt_fingerprint.json").write_text('{"format_version": 1}', encoding="utf-8")
+    assert checkpoint_processor_path(checkpoint) is None
+    (checkpoint / "prompt_fingerprint.json").write_text('{"format_version": 2}', encoding="utf-8")
+    assert checkpoint_processor_path(checkpoint) == processor

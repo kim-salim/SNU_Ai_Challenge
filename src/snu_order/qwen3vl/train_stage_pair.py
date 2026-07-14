@@ -30,6 +30,7 @@ from .dataset_single_frame import (
     move_stage_pair_batch_to_device,
 )
 from .lockbox import guard_not_lockbox_path
+from .gradient_health import GradientHealthMonitor
 from .metrics_stage_pair import compare_with_baseline, compute_stage_pair_metrics, write_stage_pair_artifacts
 from .modeling_stage_pair import (
     build_stage_pair_head_from_config,
@@ -140,9 +141,13 @@ def _make_dataloaders(
     processor: Any | None,
 ) -> tuple[DataLoader, DataLoader | None, int]:
     max_samples = int(get_by_path(cfg, "train.max_samples", -1))
+    max_valid_samples = int(get_by_path(cfg, "eval.max_samples", -1))
     if mode.startswith("frozen"):
         train_dataset = CachedStagePairDataset(_cache_path(cfg, "train"), max_samples=max_samples if max_samples >= 0 else None)
-        valid_dataset = CachedStagePairDataset(_cache_path(cfg, "valid"))
+        valid_dataset = CachedStagePairDataset(
+            _cache_path(cfg, "valid"),
+            max_samples=max_valid_samples if max_valid_samples >= 0 else None,
+        )
         train_sampler = DistributedSampler(train_dataset, num_replicas=ddp.world_size, rank=ddp.rank, shuffle=True) if ddp.enabled else None
         train_loader = DataLoader(
             train_dataset,
@@ -159,6 +164,7 @@ def _make_dataloaders(
     valid_split = str(get_by_path(cfg, "data.valid_split"))
     guard_not_lockbox_path(train_split, purpose="stage-pair training")
     guard_not_lockbox_path(valid_split, purpose="stage-pair early stopping")
+    prompt_spec = StagePairPromptSpec.from_config(cfg)
     train_dataset = Qwen3VLSingleFrameDataset(
         train_split,
         str(get_by_path(cfg, "data.image_root", "data/raw")),
@@ -167,15 +173,15 @@ def _make_dataloaders(
         permutation_probability=float(get_by_path(cfg, "data.permutation_probability", 1.0)),
         seed=int(get_by_path(cfg, "experiment.seed", 42)),
         max_samples=max_samples if max_samples >= 0 else None,
+        prompt_spec=prompt_spec,
     )
-    max_valid_samples = int(get_by_path(cfg, "eval.max_samples", -1))
     valid_dataset = Qwen3VLSingleFrameDataset(
         valid_split,
         str(get_by_path(cfg, "data.image_root", "data/raw")),
         training=False,
         max_samples=max_valid_samples if max_valid_samples >= 0 else None,
+        prompt_spec=prompt_spec,
     )
-    prompt_spec = StagePairPromptSpec.from_config(cfg)
     model_revision = str(get_by_path(cfg, "backbone.revision", "")) or None
     train_sampler = DistributedSampler(train_dataset, num_replicas=ddp.world_size, rank=ddp.rank, shuffle=True) if ddp.enabled else None
     train_loader = DataLoader(
@@ -264,13 +270,19 @@ def _make_loss(cfg: dict[str, Any]) -> StagePairStructuredLoss:
     )
 
 
-def _forward_batch(model: torch.nn.Module, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+def _forward_batch(
+    model: torch.nn.Module,
+    batch: dict[str, Any],
+    *,
+    frame_chunk_size: int | None = None,
+) -> dict[str, torch.Tensor]:
     if "frame_hidden" in batch:
         return model(frame_hidden=batch["frame_hidden"])
     return model(
         inputs=batch["inputs"],
         batch_size=int(batch["batch_size"]),
         anchor_mask=batch.get("anchor_mask"),
+        frame_chunk_size=frame_chunk_size,
     )
 
 
@@ -282,22 +294,28 @@ def evaluate_model(
     output_dir: str | Path | None,
     baseline_predictions: str | None = None,
     raw_logits_path: str | Path | None = None,
+    frame_chunk_size: int | None = None,
+    frame_features_path: str | Path | None = None,
 ) -> dict[str, Any]:
     model.eval()
+    total_samples = len(loader.dataset) if hasattr(loader, "dataset") else None
+    progress_started = time.perf_counter()
+    processed_samples = 0
     ids: list[str] = []
     finals: list[torch.Tensor] = []
     stages: list[torch.Tensor] = []
     pairs: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
     answers: list[torch.Tensor] = []
+    frame_features: list[torch.Tensor] | None = [] if frame_features_path is not None else None
     latencies: list[float] = []
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in loader:
             batch = move_stage_pair_batch_to_device(batch, device)
             start = time.perf_counter()
-            outputs = _forward_batch(model, batch)
+            outputs = _forward_batch(model, batch, frame_chunk_size=frame_chunk_size)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             latencies.append(time.perf_counter() - start)
@@ -307,6 +325,17 @@ def evaluate_model(
             pairs.append(outputs["pair_logits"].detach().cpu())
             targets.append(batch["target_perm_idx"].detach().cpu())
             answers.append(batch["answer"].detach().cpu())
+            if frame_features is not None:
+                frame_features.append(outputs["frame_hidden"].detach().float().cpu())
+            processed_samples += len(batch["id"])
+            if processed_samples % 100 == 0 or (total_samples is not None and processed_samples == total_samples):
+                total_text = str(total_samples) if total_samples is not None else "?"
+                elapsed = time.perf_counter() - progress_started
+                print(
+                    f"evaluation progress: {processed_samples}/{total_text} "
+                    f"samples, elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
     final_t = torch.cat(finals, dim=0)
     stage_t = torch.cat(stages, dim=0)
     pair_t = torch.cat(pairs, dim=0)
@@ -321,6 +350,19 @@ def evaluate_model(
             pair_logits=pair_t,
             target_perm_idx=target_t,
             answer=answer_t,
+        )
+    if frame_features_path is not None:
+        destination = Path(frame_features_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if frame_features is None:
+            raise RuntimeError("frame feature capture was not initialized")
+        torch.save(
+            {
+                "ids": ids,
+                "frame_hidden": torch.cat(frame_features, dim=0),
+                "frame_chunk_size": frame_chunk_size,
+            },
+            destination,
         )
     if output_dir is not None:
         write_stage_pair_artifacts(output_dir, ids, final_t, target_t, metrics, stage_logits=stage_t, pair_logits=pair_t)
@@ -419,6 +461,20 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
 
     train_loader, valid_loader, _ = _make_dataloaders(cfg, mode, ddp, processor)
     optimizer = _build_optimizer(model, cfg)
+    gradient_health: GradientHealthMonitor | None = None
+    if bool(get_by_path(cfg, "vision_merger_lora.enabled", False)):
+        if os.environ.get("CUDA_VISIBLE_DEVICES") != "0":
+            raise RuntimeError("E2 requires CUDA_VISIBLE_DEVICES=0")
+        if not torch.cuda.is_available() or torch.cuda.device_count() != 1 or ddp.world_size != 1:
+            raise RuntimeError(
+                "E2 requires exactly one visible CUDA device and distributed world size 1: "
+                f"cuda_available={torch.cuda.is_available()}, device_count={torch.cuda.device_count()}, "
+                f"world_size={ddp.world_size}"
+            )
+        health_path = Path(
+            os.environ.get("GRADIENT_HEALTH_OUTPUT", str(output_dir / "gradient_health.json"))
+        )
+        gradient_health = GradientHealthMonitor(unwrap_model(model), health_path)
     epochs = int(get_by_path(cfg, "train.epochs_frozen" if mode.startswith("frozen") else "train.epochs", 20 if mode.startswith("frozen") else 4))
     configured_grad_accum = int(get_by_path(cfg, "train.gradient_accumulation_steps", 1 if mode.startswith("frozen") else 8))
     grad_accum = max(1, math.ceil(configured_grad_accum / ddp.world_size)) if ddp.enabled and bool(get_by_path(cfg, "train.ddp_adjust_gradient_accumulation", True)) else configured_grad_accum
@@ -433,7 +489,6 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
     skip_nonfinite_grad_steps = bool(get_by_path(cfg, "train.skip_nonfinite_grad_steps", False))
     max_consecutive_nonfinite = int(get_by_path(cfg, "train.max_consecutive_nonfinite_grad_steps", 3))
     consecutive_nonfinite = 0
-    gradient_contract_checked = False
     patience = int(get_by_path(cfg, "train.early_stopping_patience", 4 if mode.startswith("frozen") else 2))
     best_metrics: dict[str, Any] | None = None
     history: list[dict[str, Any]] = []
@@ -451,6 +506,7 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
         "run_id": run_id,
     }
 
+    gradient_contract_checked = False
     for epoch in range(1, epochs + 1):
         if hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(epoch)
@@ -521,11 +577,24 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
                 consecutive_nonfinite = 0
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], grad_clip)
+                pending_health = (
+                    gradient_health.capture_before_step(global_step + 1)
+                    if gradient_health is not None
+                    else {}
+                )
+                optimizer_step_completed = True
                 if scaler.is_enabled():
+                    scale_before = float(scaler.get_scale())
                     scaler.step(optimizer)
                     scaler.update()
+                    optimizer_step_completed = float(scaler.get_scale()) >= scale_before
                 else:
                     optimizer.step()
+                if not optimizer_step_completed:
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                if gradient_health is not None:
+                    gradient_health.capture_after_step(pending_health)
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
@@ -584,6 +653,8 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
 
     if not ddp.is_main:
         return {"mode": mode, "rank": ddp.rank, "status": "worker_complete"}
+    if gradient_health is not None:
+        gradient_health.assert_complete()
     summary = {
         "mode": mode,
         "run_id": run_id,

@@ -30,10 +30,13 @@ SENTENCE_CANDIDATES = ["Sentence", "sentence", "text", "caption", "prompt"]
 ANSWER_CANDIDATES = ["Answer", "answer", "label", "true_answer"]
 
 
-def build_single_frame_prompt(sentence: str) -> str:
+def build_single_frame_prompt(
+    sentence: str,
+    prompt_spec: StagePairPromptSpec | None = None,
+) -> str:
     return build_stage_pair_prompt(
         sentence,
-        StagePairPromptSpec(
+        prompt_spec or StagePairPromptSpec(
             pooling_mode=LEGACY_POOLING_MODE,
             anchor_text=None,
             anchor_prefix="\n",
@@ -60,6 +63,7 @@ class Qwen3VLSingleFrameDataset:
         seed: int = 42,
         max_samples: int | None = None,
         sample_indices: list[int] | None = None,
+        prompt_spec: StagePairPromptSpec | None = None,
     ) -> None:
         self.metadata_csv = Path(metadata_csv)
         self.image_root = Path(image_root)
@@ -85,6 +89,7 @@ class Qwen3VLSingleFrameDataset:
         self.permutation_probability = float(permutation_probability)
         self.seed = int(seed)
         self.epoch = 0
+        self.prompt_spec = prompt_spec
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -113,7 +118,7 @@ class Qwen3VLSingleFrameDataset:
         frames, answer, shuffle_idx = self._maybe_augment(int(index), frames, answer)
         return {
             "id": sample_id,
-            "prompt": build_single_frame_prompt(str(row[self.sentence_col])),
+            "prompt": build_single_frame_prompt(str(row[self.sentence_col]), self.prompt_spec),
             "images": frames,
             "answer": answer,
             "target_perm_idx": answer_to_perm_index(answer),

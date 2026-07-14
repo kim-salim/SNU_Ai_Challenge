@@ -18,9 +18,10 @@ from .calibration_stage_pair import (
     load_raw_stage_pair_logits,
 )
 from .dataset_single_frame import Qwen3VLSingleFrameCollator, Qwen3VLSingleFrameDataset
+from .frame_chunking import normalize_frame_chunk_size
 from .metrics_stage_pair import compute_stage_pair_metrics, write_stage_pair_artifacts
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
-from .stage_pair_prompt import StagePairPromptSpec
+from .stage_pair_prompt import StagePairPromptSpec, checkpoint_processor_path
 from .train_lora24 import _model_device
 from .train_stage_pair import evaluate_model
 
@@ -35,6 +36,8 @@ def evaluate_checkpoint(
     max_samples: int,
     split_name: str,
     calibration_path: str | Path | None = None,
+    frame_chunk_size: int | None = None,
+    save_frame_features: bool = False,
 ) -> dict[str, Any]:
     normalized_split = split_name.lower().replace("-", "_")
     if normalized_split not in {"valid_a", "valid_b"}:
@@ -43,7 +46,12 @@ def evaluate_checkpoint(
         raise RuntimeError("valid-B evaluation requires fixed valid-A calibration parameters")
     runtime_cfg = deepcopy(cfg)
     runtime_cfg.setdefault("backbone", {})["frozen"] = True
-    model, processor = build_stage_pair_model_from_config(runtime_cfg, live_backbone=True)
+    processor_path = checkpoint_processor_path(checkpoint)
+    model, processor = build_stage_pair_model_from_config(
+        runtime_cfg,
+        live_backbone=True,
+        processor_path=processor_path,
+    )
     model, _ = load_stage_pair_checkpoint(
         checkpoint,
         model,
@@ -57,13 +65,14 @@ def evaluate_checkpoint(
     model.stage_head.to(device)
     if model.pair_head is not None:
         model.pair_head.to(device)
+    spec = StagePairPromptSpec.from_config(runtime_cfg)
     dataset = Qwen3VLSingleFrameDataset(
         metadata_csv,
         image_root,
         training=False,
         max_samples=max_samples if max_samples >= 0 else None,
+        prompt_spec=spec,
     )
-    spec = StagePairPromptSpec.from_config(runtime_cfg)
     loader = DataLoader(
         dataset,
         batch_size=1,
@@ -77,14 +86,27 @@ def evaluate_checkpoint(
     )
     output = Path(output_dir)
     raw_path = output / "raw_stage_pair_logits.pt"
+    chunk_size = normalize_frame_chunk_size(
+        frame_chunk_size
+        if frame_chunk_size is not None
+        else get_by_path(runtime_cfg, "inference.frame_chunk_size", None)
+    )
     raw_metrics = evaluate_model(
         model,
         loader,
         device=device,
         output_dir=output,
         raw_logits_path=raw_path,
+        frame_chunk_size=chunk_size,
+        frame_features_path=output / "frame_features.pt" if save_frame_features else None,
     )
-    result: dict[str, Any] = {"split": normalized_split, "raw_metrics": raw_metrics, "raw_logits": str(raw_path)}
+    result: dict[str, Any] = {
+        "status": "PASS",
+        "split": normalized_split,
+        "raw_metrics": raw_metrics,
+        "raw_logits": str(raw_path),
+        "frame_chunk_size": chunk_size,
+    }
     if calibration_path is not None:
         payload = load_raw_stage_pair_logits(raw_path)
         parameters = load_calibration(calibration_path)
@@ -122,6 +144,8 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=-1)
     parser.add_argument("--split-name", choices=["valid_a", "valid_b"], default="valid_a")
     parser.add_argument("--calibration", default=None)
+    parser.add_argument("--frame-chunk-size", type=int, choices=[1, 2, 4], default=None)
+    parser.add_argument("--save-frame-features", action="store_true")
     args = parser.parse_args()
     cfg = load_config(args.config)
     result = evaluate_checkpoint(
@@ -133,6 +157,8 @@ def main() -> None:
         max_samples=args.max_samples,
         split_name=args.split_name,
         calibration_path=args.calibration,
+        frame_chunk_size=args.frame_chunk_size,
+        save_frame_features=args.save_frame_features,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import statistics
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -26,12 +27,61 @@ def _position_stage_accuracy(stage_logits: torch.Tensor, answer: torch.Tensor) -
     return float(correct.float().mean().item()) if correct.numel() else 0.0, by_pos
 
 
-def _pair_head_accuracy(pair_logits: torch.Tensor | None, answer: torch.Tensor) -> float:
+def _pair_head_metrics(pair_logits: torch.Tensor | None, answer: torch.Tensor) -> dict[str, Any]:
     if pair_logits is None:
-        return 0.0
+        return {
+            "pairwise_head_accuracy": 0.0,
+            "pairwise_head_accuracy_by_pair": {},
+            "pairwise_head_accuracy_by_temporal_gap": {},
+        }
     pred = pair_logits.detach().float().gt(0).cpu()
     targets = pair_targets_from_answer(answer.detach().cpu()).bool()
-    return float(pred.eq(targets).float().mean().item()) if pred.numel() else 0.0
+    correct = pred.eq(targets)
+    by_pair = {
+        f"{left + 1}-{right + 1}": float(correct[:, pair_index].float().mean().item())
+        for pair_index, (left, right) in enumerate(PAIRS)
+    }
+    answers = answer.detach().long().cpu()
+    by_gap: dict[str, float] = {}
+    for gap in (1, 2, 3):
+        masks = []
+        values = []
+        for pair_index, (left, right) in enumerate(PAIRS):
+            mask = answers[:, left].sub(answers[:, right]).abs().eq(gap)
+            masks.append(mask)
+            values.append(correct[:, pair_index])
+        gap_mask = torch.stack(masks, dim=1)
+        gap_correct = torch.stack(values, dim=1)
+        by_gap[str(gap)] = (
+            float(gap_correct[gap_mask].float().mean().item()) if bool(gap_mask.any()) else 0.0
+        )
+    return {
+        "pairwise_head_accuracy": float(correct.float().mean().item()) if pred.numel() else 0.0,
+        "pairwise_head_accuracy_by_pair": by_pair,
+        "pairwise_head_accuracy_by_temporal_gap": by_gap,
+    }
+
+
+def _margin_metrics(final_logits: torch.Tensor, targets: torch.Tensor) -> dict[str, Any]:
+    scores = final_logits.detach().float().cpu()
+    target_values = targets.detach().long().view(-1).cpu()
+    if not scores.shape[0]:
+        return {
+            "mean_correct_margin": 0.0,
+            "mean_wrong_margin": 0.0,
+            "high_margin_wrong_threshold": 1.0,
+            "high_margin_wrong_count": 0,
+        }
+    top2 = torch.topk(scores, k=2, dim=1).values
+    margins = top2[:, 0] - top2[:, 1]
+    correct = scores.argmax(dim=1).eq(target_values)
+    return {
+        "mean_correct_margin": float(margins[correct].mean().item()) if bool(correct.any()) else 0.0,
+        "mean_wrong_margin": float(margins[~correct].mean().item()) if bool((~correct).any()) else 0.0,
+        "median_wrong_margin": float(statistics.median(margins[~correct].tolist())) if bool((~correct).any()) else 0.0,
+        "high_margin_wrong_threshold": 1.0,
+        "high_margin_wrong_count": int(((~correct) & margins.ge(1.0)).sum().item()),
+    }
 
 
 def compute_stage_pair_metrics(
@@ -48,7 +98,15 @@ def compute_stage_pair_metrics(
     stage_acc, stage_by_position = _position_stage_accuracy(stage_logits, answer)
     metrics["stage_accuracy"] = stage_acc
     metrics["stage_accuracy_by_position"] = stage_by_position
-    metrics["pairwise_head_accuracy"] = _pair_head_accuracy(pair_logits, answer)
+    metrics.update(_pair_head_metrics(pair_logits, answer))
+    metrics.update(_margin_metrics(final_logits, target_perm_idx))
+    kendall = metrics.get("kendall_distance_histogram", {})
+    metrics["kendall_distance_le_2_error_count"] = sum(
+        int(kendall.get(str(distance), 0)) for distance in (1, 2)
+    )
+    metrics["kendall_distance_ge_4_error_count"] = sum(
+        int(kendall.get(str(distance), 0)) for distance in (4, 5, 6)
+    )
     if shuffle_consistency_rate is not None:
         metrics["shuffle_consistency_rate"] = float(shuffle_consistency_rate)
     metrics["complete_reverse_error_count"] = metrics.get("exact_reverse_error_count", 0)

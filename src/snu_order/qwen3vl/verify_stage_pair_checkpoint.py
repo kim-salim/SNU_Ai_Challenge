@@ -20,7 +20,7 @@ from .dataset_single_frame import (
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
 from .permutations import perm_index_to_answer
 from .stage_pair_checkpoint import verify_stage_pair_checkpoint_files
-from .stage_pair_prompt import StagePairPromptSpec
+from .stage_pair_prompt import StagePairPromptSpec, checkpoint_processor_path
 from .train_lora24 import _model_device
 
 
@@ -34,7 +34,12 @@ def verify_checkpoint_forward(
 ) -> dict[str, Any]:
     runtime_cfg = deepcopy(cfg)
     runtime_cfg.setdefault("backbone", {})["frozen"] = True
-    model, processor = build_stage_pair_model_from_config(runtime_cfg, live_backbone=True)
+    processor_path = checkpoint_processor_path(checkpoint)
+    model, processor = build_stage_pair_model_from_config(
+        runtime_cfg,
+        live_backbone=True,
+        processor_path=processor_path,
+    )
     manifest = verify_stage_pair_checkpoint_files(
         checkpoint,
         runtime_cfg=runtime_cfg,
@@ -53,11 +58,13 @@ def verify_checkpoint_forward(
     model.stage_head.to(device)
     if model.pair_head is not None:
         model.pair_head.to(device)
+    prompt_spec = StagePairPromptSpec.from_config(runtime_cfg)
     dataset = Qwen3VLSingleFrameDataset(
         metadata_csv,
         image_root,
         training=False,
         max_samples=max_samples,
+        prompt_spec=prompt_spec,
     )
     loader = DataLoader(
         dataset,
@@ -66,13 +73,13 @@ def verify_checkpoint_forward(
         num_workers=0,
         collate_fn=Qwen3VLSingleFrameCollator(
             processor,
-            prompt_spec=StagePairPromptSpec.from_config(runtime_cfg),
+            prompt_spec=prompt_spec,
             model_revision=str(get_by_path(runtime_cfg, "backbone.revision")),
         ),
     )
     predictions: list[int] = []
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in loader:
             batch = move_stage_pair_batch_to_device(batch, device)
             outputs = model(
