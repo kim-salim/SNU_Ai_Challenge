@@ -62,8 +62,9 @@ def run_inference(cfg: dict[str, Any]) -> Path:
             answers.extend([perm_to_answer(index_to_perm(int(idx))) for idx in pred_idx])
 
     output = Path(str(get_by_path(cfg, "output.submission", "outputs/submissions/final_submission.csv")))
-    save_submission(ids, answers, output)
     reference = get_by_path(cfg, "data.sample_submission_csv")
+    reference_path = str(reference) if reference and Path(str(reference)).exists() else None
+    save_submission(ids, answers, output, reference=reference_path)
     if reference and Path(str(reference)).exists():
         validate_submission(output, str(reference))
     return output
@@ -80,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

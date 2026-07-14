@@ -205,8 +205,10 @@ def main() -> None:
         device_index=args.device_index,
         calibration_path=args.calibration,
     )
-    save_submission(ids, answers, args.output_csv)
-    validate_submission(args.output_csv, args.sample_submission)
+    full_run = args.max_samples is None or args.max_samples < 0
+    save_submission(ids, answers, args.output_csv, reference=args.sample_submission if full_run else None)
+    if full_run:
+        validate_submission(args.output_csv, args.sample_submission)
     if args.debug_csv:
         write_debug_csv(args.debug_csv, debug_rows)
     wall_time = time.perf_counter() - wall_start

@@ -35,11 +35,10 @@ def main() -> None:
 
     ids = read_reference_ids(reference)
     answers = make_random_answers(len(ids), seed)
-    save_submission(ids, answers, output)
+    save_submission(ids, answers, output, reference=reference)
     validate_submission(output, reference)
     print(f"saved random baseline: {output}")
 
 
 if __name__ == "__main__":
     main()
-

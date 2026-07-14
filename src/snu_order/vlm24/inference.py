@@ -120,8 +120,9 @@ def main() -> None:
         )
         print(f"[{index + 1}/{len(dataset)}] id={sample['id']} answer={pred_answer} latency={latency:.2f}s")
 
-    save_submission(ids, answers, output_csv)
-    if args.max_samples is None or args.max_samples < 0:
+    full_run = args.max_samples is None or args.max_samples < 0
+    save_submission(ids, answers, output_csv, reference=args.sample_submission if full_run else None)
+    if full_run:
         validate_submission(output_csv, args.sample_submission)
     write_csv_rows(
         debug_csv,
