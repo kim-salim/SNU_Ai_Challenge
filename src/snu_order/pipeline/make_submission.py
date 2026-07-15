@@ -14,7 +14,8 @@ from snu_order.order.answer_convert import validate_answer
 
 
 def answer_to_cell(answer: Sequence[int]) -> str:
-    return json.dumps(validate_answer(answer), separators=(",", ":"))
+    # Match the competition's canonical Answer strings exactly.
+    return json.dumps(validate_answer(answer))
 
 
 def save_submission(

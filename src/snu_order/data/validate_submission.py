@@ -4,6 +4,7 @@ import argparse
 import ast
 import csv
 import hashlib
+import json
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
@@ -106,6 +107,12 @@ def validate_submission(file: str | Path, reference: str | Path | None = None) -
             parsed = parse_answer(value)
         except ValueError as exc:
             raise ValueError(f"Invalid Answer at CSV row {row_idx}: {value!r}") from exc
+        canonical = json.dumps(parsed)
+        if value != canonical:
+            raise ValueError(
+                f"Answer must use canonical serialization at CSV row {row_idx}: "
+                f"expected {canonical!r}, got {value!r}"
+            )
         if perm_to_answer(answer_to_perm(parsed)) != parsed:
             raise ValueError(f"Answer does not round-trip through the official mapping at CSV row {row_idx}")
         parsed_answers.append(parsed)
