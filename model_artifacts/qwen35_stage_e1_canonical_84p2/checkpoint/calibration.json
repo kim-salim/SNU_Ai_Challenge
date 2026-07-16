@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "tune_split": "valid_a",
+  "stage_weight": 1.0,
+  "pair_weight": 1.0,
+  "stage_temperature": 1.5,
+  "pair_temperature": 0.8,
+  "permutation_table_fingerprint": "4fed00e35314fb2c574097f98c62526f937b1147b18273eeb66247b164391884"
+}

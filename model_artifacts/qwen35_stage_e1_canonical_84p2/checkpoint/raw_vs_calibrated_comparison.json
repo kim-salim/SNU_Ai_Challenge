@@ -1,0 +1,16 @@
+{
+  "raw_exact": 0.503496527671814,
+  "calibrated_exact": 0.511188805103302,
+  "raw_MRR": 0.6237403724289647,
+  "calibrated_MRR": 0.6262839218296287,
+  "raw_top3": 0.6881119012832642,
+  "calibrated_top3": 0.6860139966011047,
+  "broken": 17,
+  "fixed": 28,
+  "unchanged_correct": 703,
+  "unchanged_wrong": 682,
+  "pair_weight": 1.0,
+  "stage_temperature": 1.5,
+  "pair_temperature": 0.8,
+  "grid_result_count": 128
+}

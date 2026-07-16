@@ -1,0 +1,14 @@
+{
+  "git": {
+    "commit": "c6f1e0149b3e3f51aa97c54db2e5c7adebc903cf",
+    "dirty": true
+  },
+  "splits": {
+    "train_split": "data/splits/ab_v1/train_ab_v1.csv",
+    "valid_split": "data/splits/ab_v1/valid_a_v1.csv",
+    "train_hash": "1fd2506b142da69908e9935e74e0c4c7ab14bf19a87345f4e7b41c3d67f02692",
+    "valid_hash": "34b94f791707c38be26587227f64a4fe166b248b9b9053ae099c59b80ba6ecd7"
+  },
+  "mode": "qlora_stage_pair",
+  "run_id": "qwen35_9b_stage_pair_v2_text_anchor_full_20260714"
+}

@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "released_at": "2026-07-16T18:38:57+09:00",
+  "source_branch": "shihoon/qwen35-stagepair-v2-text-anchor",
+  "source_code_commit": "61e113f4393d613697289a4b9c0ff15cb334b244",
+  "base_model": "Qwen/Qwen3.5-9B",
+  "base_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "checkpoint_manifest_sha256": "49f014c4f7f957cf3757dcae8099fd5a43adf71a60c952d9eeb40cd591b22039",
+  "adapter_sha256": "0496cdad78d71ce604755a290e51b55332daaa85c5e44f427ac3d2ae95742b7f",
+  "heads_sha256": "4982890f1de2ec93bcad0e9251b49aa5767935b894955859adf0ae70f995c83a",
+  "prompt_fingerprint_sha256": "ceebb96cf0f76eb7349f3a9ec8f2efb84dcb31628d338540936d690079ef69cc",
+  "processor_tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "calibration_sha256": "99d4fb5bad79da3769a9485dccbaff34f466d459218f613bc720d6808bbf67a3",
+  "submission_filename": "VERIFIED__SUBMIT_THIS_Qwen35_STAGE_E1_CANONICAL_0715.csv",
+  "submission_sha256": "4787d1fb0f1ebe8621387add7c2ab42765d5d8d2a79dfa25f7222d84c1245117",
+  "submission_schema": ["Id", "Answer"],
+  "submission_rows": 819,
+  "single_model": true,
+  "base_weights_included": false
+}
