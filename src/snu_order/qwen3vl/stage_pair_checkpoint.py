@@ -345,6 +345,22 @@ def save_stage_pair_checkpoint(
     minimal: bool = False,
     prompt_fingerprint: dict[str, Any] | None = None,
 ) -> None:
+    if int(get_by_path(cfg, "checkpoint.format_version", 1)) == 3:
+        from .stage_pair_checkpoint_v3 import save_stage_pair_checkpoint_v3
+
+        save_stage_pair_checkpoint_v3(
+            path,
+            model,
+            cfg,
+            metrics,
+            processor=processor,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            extra=extra,
+            minimal=minimal,
+            prompt_fingerprint=prompt_fingerprint,
+        )
+        return
     if int(get_by_path(cfg, "checkpoint.format_version", 1)) == FORMAT_VERSION:
         save_stage_pair_checkpoint_v2(
             path,
@@ -543,6 +559,19 @@ def load_stage_pair_checkpoint(
         if cfg is not None and int(get_by_path(cfg, "checkpoint.format_version", 1)) == FORMAT_VERSION:
             raise RuntimeError("v2 runtime config cannot load a legacy checkpoint without a manifest")
         return _load_v1(root, model, strict=strict, is_trainable=is_trainable)
+    manifest_preview = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if int(manifest_preview.get("checkpoint_format_version", -1)) == 3:
+        if not strict or cfg is None or processor is None:
+            raise RuntimeError("v3 checkpoint loading requires strict=True, runtime cfg, and processor")
+        from .stage_pair_checkpoint_v3 import load_stage_pair_checkpoint_v3
+
+        return load_stage_pair_checkpoint_v3(
+            root,
+            model,
+            is_trainable=is_trainable,
+            cfg=cfg,
+            processor=processor,
+        )
     if not strict:
         raise RuntimeError("v2 checkpoint loading requires strict=True")
     if cfg is None or processor is None:

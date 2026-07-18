@@ -221,9 +221,18 @@ def main() -> None:
     parser.add_argument("--calibration", default=None)
     parser.add_argument("--profile-json", default=None)
     parser.add_argument("--frame-chunk-size", type=int, choices=[1, 2, 4], default=None)
+    parser.add_argument("--base-model-path", default=None)
+    parser.add_argument("--base-model-revision", default=None)
+    parser.add_argument("--valid-split-binding", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.base_model_path:
+        cfg.setdefault("backbone", {})["base_model_path"] = str(args.base_model_path)
+    if args.base_model_revision:
+        cfg.setdefault("backbone", {})["revision"] = str(args.base_model_revision)
+    if args.valid_split_binding:
+        cfg.setdefault("data", {})["valid_split"] = str(args.valid_split_binding)
     image_root = args.image_root or str(get_by_path(cfg, "data.image_root", "data/raw"))
     wall_start = time.perf_counter()
     ids, answers, debug_rows = predict_rows(

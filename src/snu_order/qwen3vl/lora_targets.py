@@ -14,6 +14,10 @@ from snu_order.utils.config import get_by_path
 EXPECTED_LANGUAGE_LAYERS = 32
 EXPECTED_FULL_ATTENTION_LAYERS = 8
 EXPECTED_LINEAR_ATTENTION_LAYERS = 24
+SUPPORTED_LANGUAGE_PROFILES = {
+    32: (8, 24),
+    64: (16, 48),
+}
 FULL_ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj")
 LINEAR_ATTENTION_PROJECTIONS = ("in_proj_qkv", "in_proj_z", "out_proj")
 VISION_MERGER_SUFFIXES = ("visual.merger.linear_fc1", "visual.merger.linear_fc2")
@@ -134,12 +138,26 @@ def discover_qwen35_lora_targets(model: nn.Module, cfg: dict[str, Any]) -> list[
     layer_types = [str(value) for value in getattr(text_config, "layer_types", [])]
     configured_layers = int(getattr(text_config, "num_hidden_layers", len(layer_types)))
     type_counts = Counter(layer_types)
-    expected_type_counts = Counter(
-        {"full_attention": EXPECTED_FULL_ATTENTION_LAYERS, "linear_attention": EXPECTED_LINEAR_ATTENTION_LAYERS}
+    expected_layers = int(get_by_path(cfg, "architecture.language_layers", EXPECTED_LANGUAGE_LAYERS))
+    expected_full = int(
+        get_by_path(cfg, "architecture.full_attention_layers", EXPECTED_FULL_ATTENTION_LAYERS)
     )
-    if configured_layers != EXPECTED_LANGUAGE_LAYERS or len(layer_types) != EXPECTED_LANGUAGE_LAYERS:
+    expected_linear = int(
+        get_by_path(cfg, "architecture.linear_attention_layers", EXPECTED_LINEAR_ATTENTION_LAYERS)
+    )
+    if SUPPORTED_LANGUAGE_PROFILES.get(expected_layers) != (expected_full, expected_linear):
         _raise_plan_error(
-            f"Expected 32 language layers, got num_hidden_layers={configured_layers}, layer_types={len(layer_types)}",
+            f"Unsupported language profile {expected_layers}/{expected_full}/{expected_linear}",
+            [],
+            missing=["supported_language_profile"],
+        )
+    expected_type_counts = Counter(
+        {"full_attention": expected_full, "linear_attention": expected_linear}
+    )
+    if configured_layers != expected_layers or len(layer_types) != expected_layers:
+        _raise_plan_error(
+            f"Expected {expected_layers} language layers, got "
+            f"num_hidden_layers={configured_layers}, layer_types={len(layer_types)}",
             [],
             missing=["language_layers"],
         )
@@ -248,7 +266,13 @@ def discover_qwen35_lora_targets(model: nn.Module, cfg: dict[str, Any]) -> list[
             )
 
     manifest = [asdict(entry) for entry in entries]
-    validate_lora_manifest(manifest, vision_merger_enabled=merger_enabled)
+    validate_lora_manifest(
+        manifest,
+        vision_merger_enabled=merger_enabled,
+        expected_language_layers=expected_layers,
+        expected_full_attention_layers=expected_full,
+        expected_linear_attention_layers=expected_linear,
+    )
     return manifest
 
 
@@ -256,30 +280,44 @@ def validate_lora_manifest(
     manifest: list[dict[str, Any]],
     *,
     vision_merger_enabled: bool | None = None,
+    expected_language_layers: int | None = None,
+    expected_full_attention_layers: int | None = None,
+    expected_linear_attention_layers: int | None = None,
 ) -> None:
     full = [entry for entry in manifest if entry["group"] == TEXT_FULL_GROUP]
     linear = [entry for entry in manifest if entry["group"] == TEXT_LINEAR_GROUP]
     merger = [entry for entry in manifest if entry["group"] == VISION_MERGER_GROUP]
     errors: list[str] = []
-    if len(full) != 32:
-        errors.append(f"full modules={len(full)} expected=32")
-    if len(linear) != 72:
-        errors.append(f"linear modules={len(linear)} expected=72")
-    if len({int(entry["layer_index"]) for entry in full}) != 8:
-        errors.append("full layers must equal 8")
-    if len({int(entry["layer_index"]) for entry in linear}) != 24:
-        errors.append("linear layers must equal 24")
     covered = {int(entry["layer_index"]) for entry in full + linear}
-    if covered != set(range(32)):
+    inferred_layers = max(covered) + 1 if covered else 0
+    language_layers = int(expected_language_layers or inferred_layers)
+    profile = SUPPORTED_LANGUAGE_PROFILES.get(language_layers)
+    if profile is None:
+        errors.append(f"unsupported language layer count={language_layers}")
+        full_layers, linear_layers = 0, 0
+    else:
+        full_layers = int(expected_full_attention_layers or profile[0])
+        linear_layers = int(expected_linear_attention_layers or profile[1])
+        if profile != (full_layers, linear_layers):
+            errors.append(f"unsupported language profile={language_layers}/{full_layers}/{linear_layers}")
+    if len(full) != full_layers * len(FULL_ATTENTION_PROJECTIONS):
+        errors.append(f"full modules={len(full)} expected={full_layers * len(FULL_ATTENTION_PROJECTIONS)}")
+    if len(linear) != linear_layers * len(LINEAR_ATTENTION_PROJECTIONS):
+        errors.append(f"linear modules={len(linear)} expected={linear_layers * len(LINEAR_ATTENTION_PROJECTIONS)}")
+    if len({int(entry["layer_index"]) for entry in full}) != full_layers:
+        errors.append(f"full layers must equal {full_layers}")
+    if len({int(entry["layer_index"]) for entry in linear}) != linear_layers:
+        errors.append(f"linear layers must equal {linear_layers}")
+    if covered != set(range(language_layers)):
         errors.append(f"covered language layers={sorted(covered)}")
     expected_projection_counts = {
-        "q_proj": 8,
-        "k_proj": 8,
-        "v_proj": 8,
-        "o_proj": 8,
-        "in_proj_qkv": 24,
-        "in_proj_z": 24,
-        "out_proj": 24,
+        "q_proj": full_layers,
+        "k_proj": full_layers,
+        "v_proj": full_layers,
+        "o_proj": full_layers,
+        "in_proj_qkv": linear_layers,
+        "in_proj_z": linear_layers,
+        "out_proj": linear_layers,
     }
     actual_projection_counts = Counter(str(entry["projection_name"]) for entry in full + linear)
     if dict(actual_projection_counts) != expected_projection_counts:
@@ -443,7 +481,7 @@ def validate_gradient_contract(stage_pair_model: nn.Module) -> dict[str, int]:
         if "lora_" not in name and (parameter.requires_grad or parameter.grad is not None):
             raise RuntimeError(f"Frozen base parameter violated the gradient contract: {name}")
     head_count = 0
-    for module_name in ("set_encoder", "stage_head", "pair_head"):
+    for module_name in ("frame_projector", "set_encoder", "stage_head", "pair_head"):
         module = getattr(stage_pair_model, module_name, None)
         if module is None:
             continue

@@ -146,8 +146,14 @@ def main() -> None:
     parser.add_argument("--calibration", default=None)
     parser.add_argument("--frame-chunk-size", type=int, choices=[1, 2, 4], default=None)
     parser.add_argument("--save-frame-features", action="store_true")
+    parser.add_argument("--base-model-path", default=None)
+    parser.add_argument("--base-model-revision", default=None)
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.base_model_path:
+        cfg.setdefault("backbone", {})["base_model_path"] = str(args.base_model_path)
+    if args.base_model_revision:
+        cfg.setdefault("backbone", {})["revision"] = str(args.base_model_revision)
     result = evaluate_checkpoint(
         cfg=cfg,
         checkpoint=args.checkpoint,

@@ -195,10 +195,17 @@ def move_stage_pair_batch_to_device(batch: dict[str, Any], device: torch.device 
 
 
 class CachedStagePairDataset:
-    def __init__(self, cache_path: str | Path, *, max_samples: int | None = None) -> None:
+    def __init__(
+        self,
+        cache_path: str | Path,
+        *,
+        max_samples: int | None = None,
+        preserve_dtype: bool = False,
+        expected_hidden_size: int | None = None,
+    ) -> None:
         payload = torch.load(cache_path, map_location="cpu")
         self.ids = [str(v) for v in payload["ids"]]
-        self.frame_hidden = payload["frame_hidden"].float()
+        self.frame_hidden = payload["frame_hidden"] if preserve_dtype else payload["frame_hidden"].float()
         self.answer = payload["answer"].long()
         self.target_perm_idx = payload["target_perm_idx"].long()
         if max_samples is not None and int(max_samples) >= 0:
@@ -209,6 +216,10 @@ class CachedStagePairDataset:
             self.target_perm_idx = self.target_perm_idx[:n]
         if self.frame_hidden.ndim != 3 or self.frame_hidden.shape[1] != 4:
             raise ValueError(f"cached frame_hidden must have shape [N,4,H], got {tuple(self.frame_hidden.shape)}")
+        if expected_hidden_size is not None and int(self.frame_hidden.shape[-1]) != int(expected_hidden_size):
+            raise RuntimeError(
+                f"cached frame_hidden width={self.frame_hidden.shape[-1]} expected={int(expected_hidden_size)}"
+            )
 
     def __len__(self) -> int:
         return len(self.ids)

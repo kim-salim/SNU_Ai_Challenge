@@ -78,6 +78,18 @@ def _apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[
         out.setdefault("eval", {})["max_samples"] = int(args.max_valid_samples)
     if getattr(args, "epochs", None) is not None:
         out.setdefault("train", {})["epochs"] = int(args.epochs)
+    if getattr(args, "init_head_from", None):
+        out.setdefault("train", {})["init_head_from"] = str(args.init_head_from)
+    if getattr(args, "train_split", None):
+        out.setdefault("data", {})["train_split"] = str(args.train_split)
+    if getattr(args, "valid_split", None):
+        out.setdefault("data", {})["valid_split"] = str(args.valid_split)
+    if getattr(args, "image_root", None):
+        out.setdefault("data", {})["image_root"] = str(args.image_root)
+    if getattr(args, "base_model_path", None):
+        out.setdefault("backbone", {})["base_model_path"] = str(args.base_model_path)
+    if getattr(args, "base_model_revision", None):
+        out.setdefault("backbone", {})["revision"] = str(args.base_model_revision)
     return out
 
 
@@ -130,7 +142,8 @@ def _configure_mode(cfg: dict[str, Any], mode: str) -> dict[str, Any]:
 
 def _cache_path(cfg: dict[str, Any], split: str) -> Path:
     source = str(get_by_path(cfg, "backbone.source", "base"))
-    name = "train_ab.pt" if split == "train" else "valid_a.pt"
+    default_name = "train_ab.pt" if split == "train" else "valid_a.pt"
+    name = str(get_by_path(cfg, f"cache.{split}_filename", default_name))
     return Path(str(get_by_path(cfg, "cache.dir", "outputs/features/qwen3vl_stage_pair"))) / source / name
 
 
@@ -143,10 +156,19 @@ def _make_dataloaders(
     max_samples = int(get_by_path(cfg, "train.max_samples", -1))
     max_valid_samples = int(get_by_path(cfg, "eval.max_samples", -1))
     if mode.startswith("frozen"):
-        train_dataset = CachedStagePairDataset(_cache_path(cfg, "train"), max_samples=max_samples if max_samples >= 0 else None)
+        is_27b = str(get_by_path(cfg, "architecture.id", "")) == "qwen35_27b_stage_pair_e1_int4_v1"
+        expected_hidden = int(get_by_path(cfg, "cache.hidden_size", 5120)) if is_27b else None
+        train_dataset = CachedStagePairDataset(
+            _cache_path(cfg, "train"),
+            max_samples=max_samples if max_samples >= 0 else None,
+            preserve_dtype=is_27b,
+            expected_hidden_size=expected_hidden,
+        )
         valid_dataset = CachedStagePairDataset(
             _cache_path(cfg, "valid"),
             max_samples=max_valid_samples if max_valid_samples >= 0 else None,
+            preserve_dtype=is_27b,
+            expected_hidden_size=expected_hidden,
         )
         train_sampler = DistributedSampler(train_dataset, num_replicas=ddp.world_size, rank=ddp.rank, shuffle=True) if ddp.enabled else None
         train_loader = DataLoader(
@@ -218,6 +240,10 @@ def _make_dataloaders(
 def _build_model(cfg: dict[str, Any], mode: str) -> tuple[torch.nn.Module, Any | None]:
     if mode.startswith("frozen"):
         train_cache = torch.load(_cache_path(cfg, "train"), map_location="cpu")
+        if str(get_by_path(cfg, "architecture.id", "")) == "qwen35_27b_stage_pair_e1_int4_v1":
+            from .qwen35_27b_port import assert_27b_cache_compatible
+
+            assert_27b_cache_compatible(train_cache)
         hidden_size = int(train_cache["frame_hidden"].shape[-1])
         return build_stage_pair_head_from_config(cfg, hidden_size=hidden_size, backbone=None), None
     return build_stage_pair_model_from_config(cfg, live_backbone=True)
@@ -231,10 +257,14 @@ def _force_ddp_single_device_map(cfg: dict[str, Any], ddp: DistributedState, mod
 
 def _move_stage_pair_modules(model: torch.nn.Module, device: torch.device) -> None:
     raw = unwrap_model(model)
-    raw.set_encoder.to(device)
-    raw.stage_head.to(device)
+    is_27b = str(getattr(raw, "__class__", type(raw)).__name__) == "Qwen35_27BStagePairE1Model"
+    dtype = torch.bfloat16 if is_27b else None
+    if getattr(raw, "frame_projector", None) is not None:
+        raw.frame_projector.to(device=device, dtype=dtype)
+    raw.set_encoder.to(device=device, dtype=dtype)
+    raw.stage_head.to(device=device, dtype=dtype)
     if raw.pair_head is not None:
-        raw.pair_head.to(device)
+        raw.pair_head.to(device=device, dtype=dtype)
 
 
 def _build_optimizer(model: torch.nn.Module, cfg: dict[str, Any]) -> torch.optim.Optimizer:
@@ -251,7 +281,7 @@ def _build_optimizer(model: torch.nn.Module, cfg: dict[str, Any]) -> torch.optim
             )
         )
     head_params: list[tuple[str, torch.nn.Parameter]] = []
-    for module_name in ("set_encoder", "stage_head", "pair_head"):
+    for module_name in ("frame_projector", "set_encoder", "stage_head", "pair_head"):
         module = getattr(raw, module_name, None)
         if module is not None:
             head_params.extend((f"{module_name}.{name}", param) for name, param in module.named_parameters())
@@ -430,8 +460,17 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
         print(json.dumps({"mode": mode, "run_id": run_id, "distributed": ddp.enabled, "world_size": ddp.world_size}, ensure_ascii=False), flush=True)
 
     model, processor = _build_model(cfg, mode)
+    init_head_from = get_by_path(cfg, "train.init_head_from", None)
+    if init_head_from:
+        if str(get_by_path(cfg, "architecture.id", "")) != "qwen35_27b_stage_pair_e1_int4_v1":
+            raise RuntimeError("--init-head-from is restricted to the 27B Champion port")
+        from .qwen35_27b_port import load_migrated_champion_heads
+
+        init_report = load_migrated_champion_heads(str(init_head_from), model)
+        if ddp.is_main:
+            write_json(output_dir / "head_initialization.json", init_report)
     prompt_fingerprint: dict[str, Any] | None = None
-    if processor is not None and int(get_by_path(cfg, "checkpoint.format_version", 1)) == 2:
+    if processor is not None and int(get_by_path(cfg, "checkpoint.format_version", 1)) in {2, 3}:
         prompt_fingerprint = build_prompt_fingerprint(cfg, processor)
         if ddp.is_main:
             write_prompt_fingerprint(output_dir / "prompt_fingerprint.json", prompt_fingerprint)
@@ -479,6 +518,14 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
     configured_grad_accum = int(get_by_path(cfg, "train.gradient_accumulation_steps", 1 if mode.startswith("frozen") else 8))
     grad_accum = max(1, math.ceil(configured_grad_accum / ddp.world_size)) if ddp.enabled and bool(get_by_path(cfg, "train.ddp_adjust_gradient_accumulation", True)) else configured_grad_accum
     total_steps = max(1, math.ceil(len(train_loader) / grad_accum) * epochs)
+    head_warmup_fraction = float(get_by_path(cfg, "train.head_warmup_fraction", 0.0))
+    if not 0.0 <= head_warmup_fraction < 1.0:
+        raise RuntimeError("train.head_warmup_fraction must be in [0,1)")
+    if head_warmup_fraction > 0.0 and ddp.enabled and not bool(
+        get_by_path(cfg, "train.ddp_find_unused_parameters", False)
+    ):
+        raise RuntimeError("27B head warm-up under DDP requires ddp_find_unused_parameters=true")
+    head_warmup_steps = int(math.ceil(total_steps * head_warmup_fraction))
     scheduler = _scheduler(optimizer, total_steps, float(get_by_path(cfg, "train.warmup_ratio", 0.05)))
     amp_dtype, scaler_enabled = _amp_dtype_and_scaler_enabled(cfg)
     use_amp = torch.cuda.is_available() and amp_dtype in {torch.bfloat16, torch.float16}
@@ -517,6 +564,9 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
         seen = 0
         optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(train_loader, start=1):
+            raw_for_schedule = unwrap_model(model)
+            if hasattr(raw_for_schedule, "set_backbone_forward_frozen"):
+                raw_for_schedule.set_backbone_forward_frozen(global_step < head_warmup_steps)
             batch = move_stage_pair_batch_to_device(batch, device)
             sync_step = step % grad_accum == 0 or step == len(train_loader)
             sync_context = model.no_sync() if ddp.enabled and not sync_step else contextlib.nullcontext()
@@ -532,7 +582,11 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
-            if not gradient_contract_checked and mode == "qlora_stage_pair":
+            if (
+                not gradient_contract_checked
+                and mode == "qlora_stage_pair"
+                and global_step >= head_warmup_steps
+            ):
                 raw_model = unwrap_model(model)
                 if isinstance(getattr(getattr(raw_model, "backbone", None), "_stage_pair_lora_target_manifest", None), list):
                     gradient_report = validate_gradient_contract(raw_model)
@@ -679,6 +733,12 @@ def main() -> None:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--init-head-from", default=None)
+    parser.add_argument("--train-split", default=None)
+    parser.add_argument("--valid-split", default=None)
+    parser.add_argument("--image-root", default=None)
+    parser.add_argument("--base-model-path", default=None)
+    parser.add_argument("--base-model-revision", default=None)
     args = parser.parse_args()
     cfg = _apply_cli_overrides(load_config(args.config), args)
     result = run_training(cfg, args.mode, resume=args.resume)

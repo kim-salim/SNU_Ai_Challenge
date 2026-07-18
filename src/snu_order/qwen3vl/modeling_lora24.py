@@ -127,6 +127,10 @@ def _bnb_config(cfg: dict[str, Any]) -> Any | None:
     quant_cfg = cfg.get("quantization", {})
     if not bool(quant_cfg.get("enabled", False)):
         return None
+    if str(get_by_path(cfg, "architecture.id", "")) == "qwen35_27b_stage_pair_e1_int4_v1":
+        from .qwen35_27b_port import build_strict_nf4_config
+
+        return build_strict_nf4_config(cfg)
     try:
         from transformers import BitsAndBytesConfig
     except ImportError as exc:
