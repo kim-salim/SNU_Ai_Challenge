@@ -10,6 +10,7 @@ import subprocess
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,9 @@ class DistributedState:
         return self.rank == 0
 
 
-def _init_distributed() -> DistributedState:
+def _init_distributed(timeout_seconds: int = 600) -> DistributedState:
+    if timeout_seconds <= 0:
+        raise ValueError("DDP timeout must be positive")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size <= 1:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -61,10 +64,15 @@ def _init_distributed() -> DistributedState:
     rank = int(os.environ.get("RANK", "0"))
     torch.cuda.set_device(local_rank)
     if not dist.is_initialized():
+        timeout = timedelta(seconds=int(timeout_seconds))
         try:
-            dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
+            dist.init_process_group(
+                backend="nccl",
+                device_id=torch.device(f"cuda:{local_rank}"),
+                timeout=timeout,
+            )
         except TypeError:
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend="nccl", timeout=timeout)
     return DistributedState(True, rank, local_rank, world_size, torch.device(f"cuda:{local_rank}"))
 
 

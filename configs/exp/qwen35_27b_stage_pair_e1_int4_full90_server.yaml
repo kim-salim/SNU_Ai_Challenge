@@ -138,6 +138,8 @@ train:
   use_grad_scaler: false
   ddp_adjust_gradient_accumulation: true
   ddp_find_unused_parameters: true
+  # Rank 0 evaluates all 954 validation samples while workers wait at the epoch boundary.
+  ddp_timeout_seconds: 7200
   grad_clip: 1.0
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

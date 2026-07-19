@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from snu_order.qwen3vl.qwen35_27b_port import (
 )
 from snu_order.qwen3vl.stage_pair_scorer import structured_permutation_logits
 from snu_order.qwen3vl.stage_pair_checkpoint_v3 import _assert_port_runtime_contract
+from snu_order.qwen3vl.train_lora24 import _init_distributed
 from snu_order.utils.config import load_config
 
 
@@ -95,6 +97,29 @@ def test_config_uses_27b_and_verified_90_10_contract() -> None:
     assert cfg["data"]["split_contract"] == "full_train_90_10_v1"
     assert cfg["data"]["train_split"].endswith("full_train_90_10_v1/train_90_v1.csv")
     assert cfg["data"]["valid_split"].endswith("full_train_90_10_v1/valid_10_v1.csv")
+    assert cfg["train"]["ddp_timeout_seconds"] == 7200
+
+
+def test_distributed_init_propagates_epoch_boundary_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda rank: None)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        torch.distributed,
+        "init_process_group",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    state = _init_distributed(timeout_seconds=7200)
+
+    assert state.enabled is True
+    assert state.rank == 3
+    assert calls[0]["backend"] == "nccl"
+    assert calls[0]["timeout"] == timedelta(seconds=7200)
 
 
 def test_qwen35_27b_architecture_exact_contract() -> None:

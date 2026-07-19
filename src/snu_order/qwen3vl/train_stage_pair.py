@@ -444,7 +444,10 @@ def run_training(cfg: dict[str, Any], mode: str, *, resume: str | None = None) -
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode}")
     cfg = _configure_mode(cfg, mode)
-    ddp = _init_distributed()
+    ddp_timeout_seconds = int(get_by_path(cfg, "train.ddp_timeout_seconds", 600))
+    if not 1 <= ddp_timeout_seconds <= 86_400:
+        raise RuntimeError("train.ddp_timeout_seconds must be in [1, 86400]")
+    ddp = _init_distributed(timeout_seconds=ddp_timeout_seconds)
     _force_ddp_single_device_map(cfg, ddp, mode)
     seed = int(get_by_path(cfg, "experiment.seed", 42))
     seed_everything(seed + ddp.rank)
