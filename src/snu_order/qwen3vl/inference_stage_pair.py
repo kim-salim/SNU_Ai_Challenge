@@ -34,6 +34,7 @@ from .stage_pair_prompt import (
     prepare_stage_pair_multimodal_inputs,
 )
 from .train_lora24 import _model_device
+from .train_stage_pair import _move_stage_pair_modules
 
 
 ID_CANDIDATES = ["Id", "ID", "id", "sample_id", "sampleId"]
@@ -111,10 +112,7 @@ def predict_rows(
         processor=processor,
     )
     device = _model_device(model)
-    model.set_encoder.to(device)
-    model.stage_head.to(device)
-    if model.pair_head is not None:
-        model.pair_head.to(device)
+    _move_stage_pair_modules(model, device)
     model.eval()
 
     ids: list[str] = []

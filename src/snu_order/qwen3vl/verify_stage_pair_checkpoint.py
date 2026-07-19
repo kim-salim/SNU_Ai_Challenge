@@ -22,6 +22,7 @@ from .permutations import perm_index_to_answer
 from .stage_pair_checkpoint import verify_stage_pair_checkpoint_files
 from .stage_pair_prompt import StagePairPromptSpec, checkpoint_processor_path
 from .train_lora24 import _model_device
+from .train_stage_pair import _move_stage_pair_modules
 
 
 def verify_checkpoint_forward(
@@ -54,10 +55,7 @@ def verify_checkpoint_forward(
         processor=processor,
     )
     device = _model_device(model)
-    model.set_encoder.to(device)
-    model.stage_head.to(device)
-    if model.pair_head is not None:
-        model.pair_head.to(device)
+    _move_stage_pair_modules(model, device)
     prompt_spec = StagePairPromptSpec.from_config(runtime_cfg)
     dataset = Qwen3VLSingleFrameDataset(
         metadata_csv,
@@ -114,9 +112,16 @@ def main() -> None:
     parser.add_argument("--image-root", required=True)
     parser.add_argument("--max-samples", type=int, default=8)
     parser.add_argument("--output-json", default=None)
+    parser.add_argument("--base-model-path", default=None)
+    parser.add_argument("--base-model-revision", default=None)
     args = parser.parse_args()
+    cfg = load_config(args.config)
+    if args.base_model_path:
+        cfg.setdefault("backbone", {})["base_model_path"] = str(args.base_model_path)
+    if args.base_model_revision:
+        cfg.setdefault("backbone", {})["revision"] = str(args.base_model_revision)
     result = verify_checkpoint_forward(
-        cfg=load_config(args.config),
+        cfg=cfg,
         checkpoint=args.checkpoint,
         metadata_csv=args.metadata_csv,
         image_root=args.image_root,

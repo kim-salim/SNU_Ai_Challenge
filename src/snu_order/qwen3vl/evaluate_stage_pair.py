@@ -23,7 +23,7 @@ from .metrics_stage_pair import compute_stage_pair_metrics, write_stage_pair_art
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
 from .stage_pair_prompt import StagePairPromptSpec, checkpoint_processor_path
 from .train_lora24 import _model_device
-from .train_stage_pair import evaluate_model
+from .train_stage_pair import _move_stage_pair_modules, evaluate_model
 
 
 def evaluate_checkpoint(
@@ -61,10 +61,7 @@ def evaluate_checkpoint(
         processor=processor,
     )
     device = _model_device(model)
-    model.set_encoder.to(device)
-    model.stage_head.to(device)
-    if model.pair_head is not None:
-        model.pair_head.to(device)
+    _move_stage_pair_modules(model, device)
     spec = StagePairPromptSpec.from_config(runtime_cfg)
     dataset = Qwen3VLSingleFrameDataset(
         metadata_csv,
