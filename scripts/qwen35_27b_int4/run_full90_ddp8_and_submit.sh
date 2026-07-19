@@ -40,7 +40,7 @@ trap on_error ERR
 for required in "$CONFIG" "$MIGRATED_HEADS" "$TRAIN_CSV" "$VALID_CSV" "$TEST_CSV" "$REFERENCE_CSV" "$MODEL_PATH/config.json"; do
   [[ -s "$required" ]] || { echo "BLOCKED: required input missing: $required" >&2; exit 2; }
 done
-[[ "$(find "$MODEL_PATH" -maxdepth 1 -name 'model-*.safetensors' -type l -o -name 'model-*.safetensors' -type f | wc -l)" -eq 11 ]] || {
+[[ "$(find "$MODEL_PATH" -maxdepth 1 \( -type l -o -type f \) -name 'model.safetensors-*.safetensors' | wc -l)" -eq 11 ]] || {
   echo "BLOCKED: expected 11 model shards" >&2
   exit 2
 }
