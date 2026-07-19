@@ -330,10 +330,25 @@ def apply_lora_if_enabled(backbone: nn.Module, cfg: dict[str, Any]) -> nn.Module
         lora_dropout = float(get_by_path(cfg, "lora.dropout", 0.05))
 
     if bool(get_by_path(cfg, "quantization.enabled", True)):
-        backbone = prepare_model_for_kbit_training(
-            backbone,
-            use_gradient_checkpointing=bool(get_by_path(cfg, "train.gradient_checkpointing", True)),
+        prepare_kwargs: dict[str, Any] = {
+            "use_gradient_checkpointing": bool(get_by_path(cfg, "train.gradient_checkpointing", True)),
+        }
+        checkpointing_use_reentrant = get_by_path(
+            cfg,
+            "train.gradient_checkpointing_use_reentrant",
+            None,
         )
+        if checkpointing_use_reentrant is not None:
+            if "gradient_checkpointing_kwargs" not in inspect.signature(
+                prepare_model_for_kbit_training
+            ).parameters:
+                raise RuntimeError(
+                    "Installed PEFT does not support explicit gradient checkpointing semantics"
+                )
+            prepare_kwargs["gradient_checkpointing_kwargs"] = {
+                "use_reentrant": bool(checkpointing_use_reentrant),
+            }
+        backbone = prepare_model_for_kbit_training(backbone, **prepare_kwargs)
     for parameter in backbone.parameters():
         parameter.requires_grad = False
     lora_kwargs: dict[str, Any] = {
