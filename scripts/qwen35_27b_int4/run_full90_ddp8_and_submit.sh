@@ -28,6 +28,12 @@ FINAL_NAME="VERIFIED__SUBMIT_THIS_QWEN35_27B_E1_INT4_FULL90_0719.csv"
 FINAL_CSV="$FINAL_ROOT/$FINAL_NAME"
 EASY_COPY="/home/shpark/snu-ai-challenge/$FINAL_NAME"
 STATUS_JSON="$RUN_ROOT/pipeline_status.json"
+RESUME_POST_TRAINING="${QWEN27_RESUME_POST_TRAINING:-0}"
+
+[[ "$RESUME_POST_TRAINING" == "0" || "$RESUME_POST_TRAINING" == "1" ]] || {
+  echo "BLOCKED: QWEN27_RESUME_POST_TRAINING must be 0 or 1" >&2
+  exit 2
+}
 
 mkdir -p "$RUN_ROOT"
 on_error() {
@@ -48,10 +54,17 @@ done
   echo "BLOCKED: 27B model download is incomplete" >&2
   exit 2
 }
-[[ ! -e "$FINAL_ROOT" && ! -e "$EASY_COPY" ]] || {
-  echo "BLOCKED: refusing to overwrite an existing submission artifact" >&2
-  exit 3
-}
+if [[ "$RESUME_POST_TRAINING" == "1" ]]; then
+  [[ ! -e "$FINAL_CSV" && ! -e "$EASY_COPY" ]] || {
+    echo "BLOCKED: refusing to overwrite an existing submission artifact" >&2
+    exit 3
+  }
+else
+  [[ ! -e "$FINAL_ROOT" && ! -e "$EASY_COPY" ]] || {
+    echo "BLOCKED: refusing to overwrite an existing submission artifact" >&2
+    exit 3
+  }
+fi
 
 docker_common=(
   docker run --rm --gpus all --network none --ipc=host --shm-size=64g
@@ -75,20 +88,25 @@ docker_common=(
   -w "$ROOT"
 )
 
-printf '{"status":"TRAINING_STARTING","run_id":"%s","world_size":8,"train_samples":8581,"valid_samples":954}\n' "$RUN_ID" > "$STATUS_JSON"
-echo "$(date --iso-8601=seconds) starting 27B NF4 QLoRA on GPUs 0-7"
-"${docker_common[@]}" \
-  -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-  -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
-  -e NCCL_DEBUG=WARN \
-  "$IMAGE" \
-  /opt/venv/bin/torchrun --nproc_per_node=8 --master_addr=127.0.0.1 --master_port=29527 \
-  -m snu_order.qwen3vl.train_stage_pair \
-  --config "$CONFIG" \
-  --mode qlora_stage_pair \
-  --init-head-from "$MIGRATED_HEADS" \
-  --epochs 3 \
-  --run-id "$RUN_ID"
+if [[ "$RESUME_POST_TRAINING" == "0" ]]; then
+  printf '{"status":"TRAINING_STARTING","run_id":"%s","world_size":8,"train_samples":8581,"valid_samples":954}\n' "$RUN_ID" > "$STATUS_JSON"
+  echo "$(date --iso-8601=seconds) starting 27B NF4 QLoRA on GPUs 0-7"
+  "${docker_common[@]}" \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+    -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+    -e NCCL_DEBUG=WARN \
+    "$IMAGE" \
+    /opt/venv/bin/torchrun --nproc_per_node=8 --master_addr=127.0.0.1 --master_port=29527 \
+    -m snu_order.qwen3vl.train_stage_pair \
+    --config "$CONFIG" \
+    --mode qlora_stage_pair \
+    --init-head-from "$MIGRATED_HEADS" \
+    --epochs 3 \
+    --run-id "$RUN_ID"
+else
+  printf '{"status":"POST_TRAINING_RESUME","run_id":"%s"}\n' "$RUN_ID" > "$STATUS_JSON"
+  echo "$(date --iso-8601=seconds) resuming completed 27B run at checkpoint verification"
+fi
 
 [[ -s "$SUMMARY" ]] || { echo "BLOCKED: training ended without summary.json" >&2; exit 4; }
 for required in checkpoint_manifest.json heads.pt prompt_fingerprint.json permutations.json lora_target_manifest.json; do

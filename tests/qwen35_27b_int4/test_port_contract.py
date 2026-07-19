@@ -28,6 +28,7 @@ from snu_order.qwen3vl.qwen35_27b_port import (
 )
 from snu_order.qwen3vl.stage_pair_scorer import structured_permutation_logits
 from snu_order.qwen3vl.stage_pair_checkpoint_v3 import _assert_port_runtime_contract
+from snu_order.qwen3vl.stage_pair_checkpoint import verify_stage_pair_checkpoint_files
 from snu_order.qwen3vl.train_lora24 import _init_distributed
 from snu_order.utils.config import load_config
 
@@ -120,6 +121,37 @@ def test_distributed_init_propagates_epoch_boundary_timeout(monkeypatch: pytest.
     assert state.rank == 3
     assert calls[0]["backend"] == "nccl"
     assert calls[0]["timeout"] == timedelta(seconds=7200)
+
+
+def test_generic_checkpoint_verifier_dispatches_v3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "checkpoint_manifest.json").write_text(
+        json.dumps({"checkpoint_format_version": 3}),
+        encoding="utf-8",
+    )
+    expected = {"checkpoint_format_version": 3, "status": "verified"}
+    calls: list[tuple] = []
+
+    def fake_verify(path, *, runtime_cfg=None, processor=None, model=None):
+        calls.append((Path(path), runtime_cfg, processor, model))
+        return expected
+
+    monkeypatch.setattr(
+        "snu_order.qwen3vl.stage_pair_checkpoint_v3.verify_stage_pair_checkpoint_v3",
+        fake_verify,
+    )
+    runtime_cfg = {"checkpoint": {"format_version": 3}}
+    processor = object()
+
+    result = verify_stage_pair_checkpoint_files(
+        checkpoint,
+        runtime_cfg=runtime_cfg,
+        processor=processor,
+    )
+
+    assert result is expected
+    assert calls == [(checkpoint, runtime_cfg, processor, None)]
 
 
 def test_qwen35_27b_architecture_exact_contract() -> None:

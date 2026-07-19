@@ -401,7 +401,16 @@ def verify_stage_pair_checkpoint_files(
     if not manifest_path.is_file():
         raise RuntimeError(f"v2 checkpoint manifest is missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if int(manifest.get("checkpoint_format_version", -1)) != FORMAT_VERSION:
+    checkpoint_format_version = int(manifest.get("checkpoint_format_version", -1))
+    if checkpoint_format_version == 3:
+        from .stage_pair_checkpoint_v3 import verify_stage_pair_checkpoint_v3
+
+        return verify_stage_pair_checkpoint_v3(
+            root,
+            runtime_cfg=runtime_cfg,
+            processor=processor,
+        )
+    if checkpoint_format_version != FORMAT_VERSION:
         raise RuntimeError(f"Unsupported checkpoint format: {manifest.get('checkpoint_format_version')}")
     file_entries = manifest.get("files")
     if not isinstance(file_entries, list) or not file_entries:

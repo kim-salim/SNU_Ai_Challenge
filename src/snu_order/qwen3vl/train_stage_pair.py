@@ -744,9 +744,13 @@ def main() -> None:
     parser.add_argument("--base-model-revision", default=None)
     args = parser.parse_args()
     cfg = _apply_cli_overrides(load_config(args.config), args)
-    result = run_training(cfg, args.mode, resume=args.resume)
-    if int(os.environ.get("RANK", "0")) == 0:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        result = run_training(cfg, args.mode, resume=args.resume)
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
