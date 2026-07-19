@@ -82,7 +82,7 @@ echo "$(date --iso-8601=seconds) starting 27B NF4 QLoRA on GPUs 0-7"
   -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   -e NCCL_DEBUG=WARN \
   "$IMAGE" \
-  /opt/venv/bin/torchrun --standalone --nproc_per_node=8 --master_port=29527 \
+  /opt/venv/bin/torchrun --nproc_per_node=8 --master_addr=127.0.0.1 --master_port=29527 \
   -m snu_order.qwen3vl.train_stage_pair \
   --config "$CONFIG" \
   --mode qlora_stage_pair \
