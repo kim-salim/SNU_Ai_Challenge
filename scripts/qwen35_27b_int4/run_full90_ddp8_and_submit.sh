@@ -73,7 +73,6 @@ docker_common=(
   -v "$HF_HOME_HOST:$HF_HOME_HOST:ro"
   -v /home/shpark/snu-ai-challenge/artifacts:/home/shpark/snu-ai-challenge/artifacts
   -w "$ROOT"
-  "$IMAGE"
 )
 
 printf '{"status":"TRAINING_STARTING","run_id":"%s","world_size":8,"train_samples":8581,"valid_samples":954}\n' "$RUN_ID" > "$STATUS_JSON"
@@ -82,6 +81,7 @@ echo "$(date --iso-8601=seconds) starting 27B NF4 QLoRA on GPUs 0-7"
   -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   -e NCCL_DEBUG=WARN \
+  "$IMAGE" \
   /opt/venv/bin/torchrun --standalone --nproc_per_node=8 --master_port=29527 \
   -m snu_order.qwen3vl.train_stage_pair \
   --config "$CONFIG" \
@@ -98,7 +98,7 @@ done
 mkdir -p "$POST_ROOT" "$FINAL_ROOT"
 
 docker_single() {
-  "${docker_common[@]}" -e CUDA_VISIBLE_DEVICES=0 "$@"
+  "${docker_common[@]}" -e CUDA_VISIBLE_DEVICES=0 "$IMAGE" "$@"
 }
 
 echo "Verifying the selected 27B checkpoint."
