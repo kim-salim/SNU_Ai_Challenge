@@ -60,6 +60,7 @@ def run_smoke(
     device_index = int(os.environ.get("QWEN35_27B_CUDA_DEVICE", "0"))
     cfg["backbone"]["device_map"] = {"": device_index}
     started = time.perf_counter()
+    torch.cuda.set_device(device_index)
     torch.cuda.reset_peak_memory_stats(device_index)
     model, processor = build_stage_pair_model_from_config(cfg, live_backbone=True)
     architecture = validate_qwen35_27b_architecture(model.backbone.config)
