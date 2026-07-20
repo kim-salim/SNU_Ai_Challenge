@@ -40,8 +40,8 @@ def evaluate_checkpoint(
     save_frame_features: bool = False,
 ) -> dict[str, Any]:
     normalized_split = split_name.lower().replace("-", "_")
-    if normalized_split not in {"valid_a", "valid_b"}:
-        raise RuntimeError(f"Evaluation split must be valid_a or valid_b, got {split_name!r}")
+    if normalized_split not in {"train_teacher", "valid_a", "valid_b"}:
+        raise RuntimeError(f"Evaluation split must be train_teacher, valid_a, or valid_b, got {split_name!r}")
     if normalized_split == "valid_b" and calibration_path is None:
         raise RuntimeError("valid-B evaluation requires fixed valid-A calibration parameters")
     runtime_cfg = deepcopy(cfg)
@@ -139,7 +139,7 @@ def main() -> None:
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-samples", type=int, default=-1)
-    parser.add_argument("--split-name", choices=["valid_a", "valid_b"], default="valid_a")
+    parser.add_argument("--split-name", choices=["train_teacher", "valid_a", "valid_b"], default="valid_a")
     parser.add_argument("--calibration", default=None)
     parser.add_argument("--frame-chunk-size", type=int, choices=[1, 2, 4], default=None)
     parser.add_argument("--save-frame-features", action="store_true")

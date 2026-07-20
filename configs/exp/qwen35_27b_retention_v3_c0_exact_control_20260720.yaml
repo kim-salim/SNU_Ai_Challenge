@@ -1,0 +1,196 @@
+experiment:
+  id: qwen35_27b_retention_v3_c0_exact_control_20260720
+  run_id: qwen35_27b_retention_v3_c0_exact_control_ddp8_20260720
+  seed: 42
+
+architecture:
+  id: qwen35_27b_stage_pair_e1_int4_v1
+  source_champion: qwen35_stage_e1_canonical_84p2
+  language_hidden_size: 5120
+  language_layers: 64
+  full_attention_layers: 16
+  linear_attention_layers: 48
+
+data:
+  split_contract: full_train_90_10_v1
+  split_manifest: /home/shpark/snu-ai-challenge/data/splits/full_train_90_10_v1/split_manifest.json
+  train_split: /home/shpark/snu-ai-challenge/data/splits/full_train_90_10_v1/train_90_v1.csv
+  valid_split: /home/shpark/snu-ai-challenge/data/splits/full_train_90_10_v1/valid_10_v1.csv
+  lockbox_split: null
+  image_root: /home/shpark/snu-ai-challenge/data/raw
+  image_policy: p0_exact
+  text_policy: t0_exact
+  train_permutation_augmentation: true
+  permutation_probability: 1.0
+
+backbone:
+  source: base
+  base_model_path: /home/shpark/snu-ai-challenge/.hf-cache/hub/models--Qwen--Qwen3.5-27B/snapshots/fc05daec18b0a78c049392ed2e771dde82bdf654
+  revision: fc05daec18b0a78c049392ed2e771dde82bdf654
+  model_type: qwen3_5_vl
+  existing_lora_path: null
+  local_files_only: true
+  trust_remote_code: true
+  torch_dtype: bfloat16
+  device_map:
+    "": 0
+  frozen: false
+  freeze_vision_encoder: true
+  freeze_vision_merger: true
+  disable_deepstack_visual_features: true
+  hidden_size: 5120
+
+runtime:
+  require_no_cpu_disk_offload: true
+  offline_only: true
+  explicit_single_cuda_device: true
+
+processor:
+  min_pixels: null
+  max_pixels: null
+
+prompt:
+  enable_thinking: false
+  add_generation_prompt: false
+  anchor_text: "STATE:"
+  anchor_prefix: "\n"
+  strict_template: true
+
+pooling:
+  mode: anchor_span_mean
+
+attention:
+  use_flash_attention_2: false
+  fallback_to_sdpa: true
+
+quantization:
+  enabled: true
+  bits: 4
+  quant_type: nf4
+  double_quant: true
+  compute_dtype: bf16
+  cpu_offload: false
+  disk_offload: false
+
+lora:
+  enabled: true
+  bias: none
+  ffn_enabled: false
+  full_attention:
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+  linear_attention:
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    modules:
+      - in_proj_qkv
+      - in_proj_z
+      - out_proj
+
+vision_merger_lora:
+  enabled: false
+  rank: 4
+  alpha: 8
+  dropout: 0.05
+  target_suffixes:
+    - visual.merger.linear_fc1
+    - visual.merger.linear_fc2
+
+model:
+  frame_projector_in_features: 5120
+  model_dim: 512
+  set_layers: 2
+  set_heads: 8
+  set_ffn_dim: 2048
+  dropout: 0.1
+  use_set_encoder: true
+  use_pairwise: true
+
+score:
+  stage_weight: 1.0
+  pair_weight: 0.3
+
+loss:
+  permutation_weight: 1.0
+  stage_weight: 0.3
+  pair_weight: 0.2
+  consistency_weight: 0.05
+
+train:
+  init_head_from: /home/shpark/snu-ai-challenge/repositories/qwen35-27b-int4-stage-e1-v1/artifacts/qwen35_27b_int4_port/02_implementation/migrated_heads.pt
+  epochs: 3
+  epochs_frozen: 20
+  batch_size: 64
+  micro_batch_size_per_gpu: 1
+  gradient_accumulation_steps: 8
+  lora_lr: 0.00005
+  head_lr: 0.0003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  head_warmup_fraction: 0.10
+  mixed_precision: bf16
+  use_grad_scaler: false
+  ddp_adjust_gradient_accumulation: true
+  ddp_find_unused_parameters: true
+  # Rank 0 evaluates all 954 validation samples while workers wait at the epoch boundary.
+  ddp_timeout_seconds: 7200
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  use_cache: false
+  num_workers: 0
+  early_stopping_patience: 0
+  log_interval_steps: 20
+  max_samples: -1
+
+eval:
+  batch_size: 1
+  max_samples: -1
+
+inference:
+  frame_chunk_size: 1
+
+cache:
+  dir: /home/shpark/snu-ai-challenge/repositories/qwen35-27b-int4-stage-e1-v1/outputs/features/qwen35_27b_stage_pair_e1_int4_v1
+  train_filename: train_90.pt
+  valid_filename: valid_10.pt
+  hidden_size: 5120
+  batch_size: 1
+  num_workers: 0
+  require_identity: true
+
+checkpoint:
+  format_version: 3
+  strict: true
+  verify_manifest: true
+  verify_fingerprint: true
+  architecture: qwen35_27b_stage_pair_e1_int4_v1
+
+calibration:
+  enabled: true
+  tune_split: valid_a
+  lockbox_tuning: false
+  reuse_9b_values: false
+  pair_weight_grid: [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5]
+  stage_temperature_grid: [0.7, 0.8, 1.0, 1.2, 1.5, 2.0]
+  pair_temperature_grid: [0.5, 0.7, 0.8, 1.0, 1.2, 1.5]
+
+baseline:
+  valid_predictions: null
+
+integrity:
+  p0_report: /home/shpark/snu-ai-challenge/repositories/qwen35-27b-retention-v3-component-safe/outputs/retention_v3/p0/v1_best_parity.json
+
+retention:
+  enabled: false
+
+output:
+  dir: /home/shpark/snu-ai-challenge/repositories/qwen35-27b-retention-v3-component-safe/outputs/retention_v3/c0
+  checkpoint_dir: /home/shpark/snu-ai-challenge/repositories/qwen35-27b-retention-v3-component-safe/weights/retention_v3/c0

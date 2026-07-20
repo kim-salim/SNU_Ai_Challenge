@@ -19,6 +19,8 @@ from .stage_pair_scorer import structured_permutation_logits
 
 
 ARCHITECTURE_ID = "qwen35_27b_stage_pair_e1_int4_v1"
+RETENTION_ARCHITECTURE_ID = "qwen35_27b_stage_pair_e1_champion_retention_v2"
+SUPPORTED_ARCHITECTURE_IDS = frozenset({ARCHITECTURE_ID, RETENTION_ARCHITECTURE_ID})
 EXPECTED_HIDDEN_SIZE = 5120
 EXPECTED_LANGUAGE_LAYERS = 64
 EXPECTED_FULL_ATTENTION_LAYERS = 16
@@ -27,7 +29,7 @@ EXPECTED_MODEL_TYPE_MARKER = "qwen3_5"
 
 
 def is_27b_port_config(cfg: dict[str, Any]) -> bool:
-    return str(get_by_path(cfg, "architecture.id", "")) == ARCHITECTURE_ID
+    return str(get_by_path(cfg, "architecture.id", "")) in SUPPORTED_ARCHITECTURE_IDS
 
 
 def _text_config(config: Any) -> Any:
@@ -408,7 +410,7 @@ def load_migrated_champion_heads(path: str | Any, model: nn.Module) -> dict[str,
     }
     if not isinstance(payload, dict) or set(payload) != required:
         raise RuntimeError("Migrated Champion head payload schema mismatch")
-    if payload["architecture"] != ARCHITECTURE_ID or int(payload["hidden_size"]) != EXPECTED_HIDDEN_SIZE:
+    if payload["architecture"] not in SUPPORTED_ARCHITECTURE_IDS or int(payload["hidden_size"]) != EXPECTED_HIDDEN_SIZE:
         raise RuntimeError("Migrated Champion head identity mismatch")
     if int(payload["model_dim"]) != int(getattr(model, "model_dim", -1)):
         raise RuntimeError("Migrated Champion model_dim mismatch")

@@ -23,6 +23,7 @@ from .calibration_stage_pair import (
     checkpoint_calibration_bindings,
     load_calibration,
 )
+from .canonical_stage_pair_evaluation import canonical_cpu_float32_scores, stable_ranking
 from .dataset_single_frame import build_single_frame_message, build_single_frame_prompt
 from .frame_chunking import normalize_frame_chunk_size
 from .modeling_stage_pair import build_stage_pair_model_from_config, load_stage_pair_checkpoint
@@ -167,14 +168,20 @@ def predict_rows(
             latency = time.perf_counter() - start
 
             if calibration is None:
-                scores = outputs["final_logits"].detach().float().cpu()[0]
+                scores = canonical_cpu_float32_scores(
+                    outputs["stage_logits"],
+                    outputs["pair_logits"],
+                    stage_weight=float(get_by_path(runtime_cfg, "score.stage_weight", 1.0)),
+                    pair_weight=float(get_by_path(runtime_cfg, "score.pair_weight", 0.3)),
+                )[0]
             else:
                 scores = calibrated_structured_logits(
                     outputs["stage_logits"], outputs["pair_logits"], calibration
-                ).detach().float().cpu()[0]
-            pred_perm_idx = validate_perm_index(int(scores.argmax().item()))
+                )[0]
+            ranking = stable_ranking(scores.unsqueeze(0))
+            pred_perm_idx = validate_perm_index(int(ranking.prediction[0].item()))
             answer = perm_index_to_answer(pred_perm_idx)
-            top2 = torch.topk(scores, k=2)
+            top2_values = scores[ranking.order[0, :2]]
 
             ids.append(sample_id)
             answers.append(answer)
@@ -183,9 +190,9 @@ def predict_rows(
                     "Id": sample_id,
                     "pred_perm_idx": pred_perm_idx,
                     "pred_answer": json.dumps(answer),
-                    "top1_score": float(top2.values[0].item()),
-                    "top2_score": float(top2.values[1].item()),
-                    "margin": float((top2.values[0] - top2.values[1]).item()),
+                    "top1_score": float(top2_values[0].item()),
+                    "top2_score": float(top2_values[1].item()),
+                    "margin": float((top2_values[0] - top2_values[1]).item()),
                     "latency_sec": latency,
                 }
             )

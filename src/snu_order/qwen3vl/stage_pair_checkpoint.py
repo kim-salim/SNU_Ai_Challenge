@@ -344,6 +344,7 @@ def save_stage_pair_checkpoint(
     extra: dict[str, Any] | None = None,
     minimal: bool = False,
     prompt_fingerprint: dict[str, Any] | None = None,
+    training_progress: dict[str, Any] | None = None,
 ) -> None:
     if int(get_by_path(cfg, "checkpoint.format_version", 1)) == 3:
         from .stage_pair_checkpoint_v3 import save_stage_pair_checkpoint_v3
@@ -359,8 +360,11 @@ def save_stage_pair_checkpoint(
             extra=extra,
             minimal=minimal,
             prompt_fingerprint=prompt_fingerprint,
+            training_progress=training_progress,
         )
         return
+    if training_progress is not None:
+        raise RuntimeError("mid-epoch training progress is supported only by checkpoint format v3")
     if int(get_by_path(cfg, "checkpoint.format_version", 1)) == FORMAT_VERSION:
         save_stage_pair_checkpoint_v2(
             path,

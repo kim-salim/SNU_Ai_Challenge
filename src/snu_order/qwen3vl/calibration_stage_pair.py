@@ -18,6 +18,11 @@ from .metrics24 import rows_from_logits
 from .metrics_stage_pair import compute_stage_pair_metrics
 from .permutations import PERMS
 from .stage_pair_scorer import pair_scores_from_logits, stage_scores_from_logits, structured_permutation_logits
+from .canonical_stage_pair_evaluation import (
+    canonical_cpu_float32_scores,
+    semantic_prediction_sha256,
+    stable_ranking,
+)
 
 
 DEFAULT_PAIR_WEIGHTS = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0)
@@ -81,10 +86,9 @@ def save_raw_stage_pair_logits(
     stage = stage_logits.detach().float().cpu()
     pair = pair_logits.detach().float().cpu()
     targets = target_perm_idx.detach().long().cpu()
-    raw_fused = structured_permutation_logits(stage, pair, stage_weight=1.0, pair_weight=0.3).float()
-    sorted_indices = torch.argsort(raw_fused, dim=1, descending=True)
-    true_ranks = (sorted_indices == targets[:, None]).nonzero(as_tuple=False)[:, 1].add(1)
-    top2 = torch.topk(raw_fused, k=2, dim=1).values
+    raw_fused = canonical_cpu_float32_scores(stage, pair, stage_weight=1.0, pair_weight=0.3)
+    ranking = stable_ranking(raw_fused, targets)
+    assert ranking.gt_rank is not None
     payload = {
         "format_version": 2,
         "ids": [str(value) for value in ids],
@@ -98,10 +102,14 @@ def save_raw_stage_pair_logits(
         "set_component_available": False,
         "pair_component_scores": pair_scores_from_logits(pair).float().cpu(),
         "raw_fused_scores": raw_fused.cpu(),
-        "raw_prediction": raw_fused.argmax(dim=1).long().cpu(),
-        "true_class_rank": true_ranks.long().cpu(),
-        "top1_margin": (top2[:, 0] - top2[:, 1]).float().cpu(),
-        "metadata": dict(metadata or {}),
+        "raw_prediction": ranking.prediction,
+        "true_class_rank": ranking.gt_rank,
+        "top1_margin": ranking.top1_margin,
+        "metadata": {
+            **dict(metadata or {}),
+            "scorer_mode": "canonical_cpu_float32",
+            "semantic_prediction_sha256": semantic_prediction_sha256(ids, ranking),
+        },
     }
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +163,14 @@ def load_raw_stage_pair_logits(path: str | Path) -> dict[str, Any]:
                 raise RuntimeError(f"Raw artifact row count mismatch for {key}")
         if payload["set_component_scores"] is not None or payload["set_component_available"] is not False:
             raise RuntimeError("Stage/Set/Pair architecture has no standalone Set scoring head")
+        if payload["metadata"].get("scorer_mode") == "canonical_cpu_float32":
+            canonical = canonical_cpu_float32_scores(payload["stage_logits"], payload["pair_logits"])
+            ranking = stable_ranking(canonical, payload["target_perm_idx"])
+            assert ranking.gt_rank is not None
+            if not torch.equal(ranking.prediction, payload["raw_prediction"].long().cpu()):
+                raise RuntimeError("Raw artifact prediction is not canonical CPU float32 scorer output")
+            if not torch.equal(ranking.gt_rank, payload["true_class_rank"].long().cpu()):
+                raise RuntimeError("Raw artifact GT rank is not canonical stable-ranking output")
     return payload
 
 
@@ -165,7 +181,7 @@ def calibrated_structured_logits(
 ) -> torch.Tensor:
     if parameters.stage_temperature <= 0 or parameters.pair_temperature <= 0:
         raise RuntimeError("Calibration temperatures must be positive")
-    return structured_permutation_logits(
+    return canonical_cpu_float32_scores(
         stage_logits.float() / parameters.stage_temperature,
         pair_logits.float() / parameters.pair_temperature,
         stage_weight=1.0,

@@ -11,6 +11,7 @@ import torch
 from snu_order.utils.io import write_csv_rows, write_json
 
 from .permutations import PAIRS, PERMS, pairwise_labels_from_answer, perm_index_to_answer
+from .canonical_stage_pair_evaluation import stable_ranking
 
 
 def kendall_distance(answer_a: list[int], answer_b: list[int]) -> int:
@@ -26,9 +27,9 @@ def is_exact_reverse(pred_idx: int, true_idx: int) -> bool:
 
 
 def _rank_of_gt(scores: torch.Tensor, target_idx: int) -> int:
-    order = torch.argsort(scores, descending=True)
-    match = (order == int(target_idx)).nonzero(as_tuple=False)
-    return int(match[0].item()) + 1
+    ranking = stable_ranking(scores.view(1, -1), torch.tensor([int(target_idx)]))
+    assert ranking.gt_rank is not None
+    return int(ranking.gt_rank[0].item())
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -55,11 +56,11 @@ def compute_metrics_from_logits(
     if scores.shape[0] != targets.shape[0]:
         raise ValueError("logits and targets must have same first dimension")
     n = int(scores.shape[0])
-    pred_idx = scores.argmax(dim=1)
+    ranking = stable_ranking(scores, targets)
+    pred_idx = ranking.prediction
     correct = pred_idx.eq(targets)
-    ranks = [_rank_of_gt(scores[i], int(targets[i])) for i in range(n)]
-    top_values = torch.topk(scores, k=2, dim=1).values if n else torch.empty((0, 2))
-    margins = (top_values[:, 0] - top_values[:, 1]).tolist() if n else []
+    ranks = [] if ranking.gt_rank is None else ranking.gt_rank.tolist()
+    margins = ranking.top1_margin.tolist()
 
     pred_answers = [perm_index_to_answer(int(idx)) for idx in pred_idx.tolist()]
     true_answers = [perm_index_to_answer(int(idx)) for idx in targets.tolist()]
@@ -85,7 +86,7 @@ def compute_metrics_from_logits(
         kendall_hist[str(kd)] += 1
 
     topk = {}
-    sorted_indices = torch.argsort(scores, dim=1, descending=True)
+    sorted_indices = ranking.order
     for k in (1, 2, 3, 5):
         if n:
             topk[f"top{k}_accuracy"] = float((sorted_indices[:, :k] == targets[:, None]).any(dim=1).float().mean())
@@ -125,11 +126,13 @@ def compute_metrics_from_logits(
 def rows_from_logits(ids: list[str], logits: torch.Tensor, targets: torch.Tensor) -> list[dict[str, Any]]:
     scores = logits.detach().float().cpu()
     target_values = targets.long().view(-1).cpu()
-    pred_idx = scores.argmax(dim=1)
+    ranking = stable_ranking(scores, target_values)
+    pred_idx = ranking.prediction
     rows: list[dict[str, Any]] = []
     for sample_id, score_row, true_idx, pred in zip(ids, scores, target_values, pred_idx, strict=True):
-        gt_rank = _rank_of_gt(score_row, int(true_idx))
-        top2 = torch.topk(score_row, k=2).values
+        assert ranking.gt_rank is not None
+        row_index = len(rows)
+        gt_rank = int(ranking.gt_rank[row_index].item())
         true_answer = perm_index_to_answer(int(true_idx))
         pred_answer = perm_index_to_answer(int(pred))
         rows.append(
@@ -140,7 +143,7 @@ def rows_from_logits(ids: list[str], logits: torch.Tensor, targets: torch.Tensor
                 "true_perm_idx": int(true_idx),
                 "pred_perm_idx": int(pred),
                 "gt_rank": gt_rank,
-                "top1_margin": float(top2[0] - top2[1]),
+                "top1_margin": float(ranking.top1_margin[row_index]),
                 "correct": int(int(true_idx) == int(pred)),
             }
         )
