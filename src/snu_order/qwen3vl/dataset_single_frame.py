@@ -64,6 +64,8 @@ class Qwen3VLSingleFrameDataset:
         max_samples: int | None = None,
         sample_indices: list[int] | None = None,
         prompt_spec: StagePairPromptSpec | None = None,
+        teacher_store: Any | None = None,
+        reference_store: Any | None = None,
     ) -> None:
         self.metadata_csv = Path(metadata_csv)
         self.image_root = Path(image_root)
@@ -90,6 +92,8 @@ class Qwen3VLSingleFrameDataset:
         self.seed = int(seed)
         self.epoch = 0
         self.prompt_spec = prompt_spec
+        self.teacher_store = teacher_store
+        self.reference_store = reference_store
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -116,7 +120,7 @@ class Qwen3VLSingleFrameDataset:
             raise RuntimeError(f"Failed to load frames for sample id={sample_id}") from exc
         answer = parse_answer(row[self.answer_col])
         frames, answer, shuffle_idx = self._maybe_augment(int(index), frames, answer)
-        return {
+        sample = {
             "id": sample_id,
             "prompt": build_single_frame_prompt(str(row[self.sentence_col]), self.prompt_spec),
             "images": frames,
@@ -126,6 +130,11 @@ class Qwen3VLSingleFrameDataset:
             "pairwise_labels": pairwise_labels_from_answer(answer),
             "shuffle_idx": None if shuffle_idx is None else list(shuffle_idx),
         }
+        if self.teacher_store is not None:
+            sample.update(self.teacher_store.sample(sample_id, shuffle_idx))
+        if self.reference_store is not None:
+            sample.update(self.reference_store.sample(sample_id, shuffle_idx))
+        return sample
 
 
 class Qwen3VLSingleFrameCollator:
@@ -160,6 +169,31 @@ class Qwen3VLSingleFrameCollator:
             "pairwise_labels": torch.tensor([sample["pairwise_labels"] for sample in samples], dtype=torch.float32),
             "batch_size": len(samples),
         }
+        teacher_keys = (
+            "teacher_stage_logits",
+            "teacher_pair_logits",
+            "teacher_final_logits",
+            "teacher_correct",
+        )
+        present = [key for key in teacher_keys if key in samples[0]]
+        if present:
+            if present != list(teacher_keys) or any(any(key not in sample for key in teacher_keys) for sample in samples):
+                raise RuntimeError("Partial Champion teacher payload in collator batch")
+            for key in teacher_keys:
+                batch[key] = torch.stack([sample[key] for sample in samples], dim=0)
+        reference_keys = (
+            "reference_stage_logits",
+            "reference_pair_logits",
+            "reference_final_logits",
+        )
+        reference_present = [key for key in reference_keys if key in samples[0]]
+        if reference_present:
+            if reference_present != list(reference_keys) or any(
+                any(key not in sample for key in reference_keys) for sample in samples
+            ):
+                raise RuntimeError("Partial v1 reference payload in collator batch")
+            for key in reference_keys:
+                batch[key] = torch.stack([sample[key] for sample in samples], dim=0)
         if self.processor is None:
             return batch
         conversations = []

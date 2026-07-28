@@ -277,7 +277,9 @@ class Qwen3VLStagePairModel(nn.Module):
 def build_stage_pair_head_from_config(cfg: dict[str, Any], *, hidden_size: int, backbone: nn.Module | None = None) -> Qwen3VLStagePairModel:
     architecture_id = str(get_by_path(cfg, "architecture.id", ""))
     model_class: type[Qwen3VLStagePairModel] = Qwen3VLStagePairModel
-    if architecture_id == "qwen35_27b_stage_pair_e1_int4_v1":
+    from .qwen35_27b_port import is_27b_port_config
+
+    if is_27b_port_config(cfg):
         from .qwen35_27b_port import Qwen35_27BStagePairE1Model
 
         model_class = Qwen35_27BStagePairE1Model
@@ -358,7 +360,9 @@ def build_stage_pair_model_from_config(
     if get_by_path(cfg, "backbone.revision", None):
         backbone_cfg["model"]["revision"] = get_by_path(cfg, "backbone.revision")
     backbone = load_qwen3_backbone(backbone_cfg)
-    if str(get_by_path(cfg, "architecture.id", "")) == "qwen35_27b_stage_pair_e1_int4_v1":
+    from .qwen35_27b_port import is_27b_port_config
+
+    if is_27b_port_config(cfg):
         from .qwen35_27b_port import validate_qwen35_27b_architecture
 
         validate_qwen35_27b_architecture(backbone.config)

@@ -20,6 +20,7 @@ from .permutations import PERMS
 from .qwen35_27b_port import (
     ARCHITECTURE_ID,
     EXPECTED_HIDDEN_SIZE,
+    SUPPORTED_ARCHITECTURE_IDS,
     quantization_contract,
     validate_qwen35_27b_architecture,
 )
@@ -62,6 +63,7 @@ def _port_runtime_contract(cfg: dict[str, Any]) -> dict[str, Any]:
         "vision_merger_lora.enabled",
         "model",
         "score",
+        "retention",
     )
     return {path: get_by_path(cfg, path, None) for path in paths}
 
@@ -74,6 +76,22 @@ def _assert_port_runtime_contract(saved: dict[str, Any], current: dict[str, Any]
         for key in expected
         if expected[key] != observed[key]
     }
+    if set(mismatches) == {"retention"}:
+        saved_retention = expected["retention"]
+        current_retention = observed["retention"]
+        shared_warmup_fork = bool(get_by_path(saved, "train.fork_after_head_warmup", False))
+        explicit_override = bool(
+            get_by_path(current, "checkpoint.allow_shared_warmup_retention_fork", False)
+        )
+        component_safe_target = (
+            isinstance(current_retention, dict)
+            and current_retention.get("enabled") is True
+            and current_retention.get("mode") == "component_safe_v3"
+            and current_retention.get("soft_kl") is False
+        )
+        retention_disabled_at_fork = saved_retention in (None, {"enabled": False})
+        if shared_warmup_fork and explicit_override and component_safe_target and retention_disabled_at_fork:
+            mismatches = {}
     if mismatches:
         raise RuntimeError(f"27B checkpoint/runtime contract mismatch: {json.dumps(mismatches, sort_keys=True)}")
 
@@ -106,12 +124,12 @@ def _atomic_replace(staging: Path, destination: Path) -> None:
         raise
 
 
-def _write_heads(path: Path, model: Any, metrics: dict[str, Any]) -> None:
+def _write_heads(path: Path, model: Any, metrics: dict[str, Any], *, architecture_id: str) -> None:
     if not hasattr(model, "frame_projector"):
         raise RuntimeError("27B v3 checkpoint requires frame_projector")
     torch.save(
         {
-            "architecture": ARCHITECTURE_ID,
+            "architecture": architecture_id,
             "frame_projector": model.frame_projector.state_dict(),
             "set_encoder": model.set_encoder.state_dict(),
             "stage_head": model.stage_head.state_dict(),
@@ -164,7 +182,7 @@ def build_v3_binding(
     if len(adapter_weights) != 1:
         raise RuntimeError("27B v3 checkpoint requires exactly one adapter weight file")
     return {
-        "architecture": ARCHITECTURE_ID,
+        "architecture": str(get_by_path(cfg, "architecture.id")),
         "base_model_path": str(get_by_path(cfg, "backbone.base_model_path")),
         "base_model_revision": get_by_path(cfg, "backbone.revision", None),
         "backbone_config_sha256": _canonical_sha256(base_config),
@@ -199,6 +217,7 @@ def save_stage_pair_checkpoint_v3(
     extra: dict[str, Any] | None = None,
     minimal: bool = False,
     prompt_fingerprint: dict[str, Any] | None = None,
+    training_progress: dict[str, Any] | None = None,
 ) -> None:
     from .stage_pair_checkpoint import (
         _package_versions,
@@ -207,7 +226,8 @@ def save_stage_pair_checkpoint_v3(
     )
 
     raw = unwrap_model(model)
-    if str(get_by_path(cfg, "architecture.id", "")) != ARCHITECTURE_ID:
+    architecture_id = str(get_by_path(cfg, "architecture.id", ""))
+    if architecture_id not in SUPPORTED_ARCHITECTURE_IDS:
         raise RuntimeError("v3 checkpoint is reserved for the 27B Champion port")
     if not str(get_by_path(cfg, "backbone.revision", "") or ""):
         raise RuntimeError("v3 checkpoint requires a pinned 27B base revision")
@@ -222,7 +242,7 @@ def save_stage_pair_checkpoint_v3(
     staging = destination.with_name(f".{destination.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
     staging.mkdir(parents=False, exist_ok=False)
     try:
-        _write_heads(staging / "heads.pt", raw, metrics)
+        _write_heads(staging / "heads.pt", raw, metrics, architecture_id=architecture_id)
         backbone = raw.backbone
         manifest = getattr(backbone, "_stage_pair_lora_target_manifest", None)
         if not _requires_adapter(cfg) or not isinstance(manifest, list):
@@ -250,6 +270,8 @@ def save_stage_pair_checkpoint_v3(
                 state["optimizer"] = optimizer.state_dict()
             if scheduler is not None:
                 state["scheduler"] = scheduler.state_dict()
+            if training_progress is not None:
+                state["training_progress"] = dict(training_progress)
             if state:
                 torch.save(state, staging / "training_state.pt")
         calibration_sha = None if extra is None else extra.get("calibration_sha256")
@@ -312,7 +334,8 @@ def verify_stage_pair_checkpoint_v3(
     saved_cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
     if int(get_by_path(saved_cfg, "checkpoint.format_version", -1)) != FORMAT_VERSION:
         raise RuntimeError("saved config is not checkpoint v3")
-    if str(get_by_path(saved_cfg, "architecture.id", "")) != ARCHITECTURE_ID:
+    saved_architecture = str(get_by_path(saved_cfg, "architecture.id", ""))
+    if saved_architecture not in SUPPORTED_ARCHITECTURE_IDS:
         raise RuntimeError("saved architecture id mismatch")
     if runtime_cfg is not None:
         _assert_port_runtime_contract(saved_cfg, runtime_cfg)
@@ -333,7 +356,7 @@ def verify_stage_pair_checkpoint_v3(
         current = build_prompt_fingerprint(runtime_cfg or saved_cfg, processor, format_version=2)
         assert_prompt_fingerprint_match(saved_fingerprint, current)
     binding = manifest.get("binding")
-    if not isinstance(binding, dict) or binding.get("architecture") != ARCHITECTURE_ID:
+    if not isinstance(binding, dict) or binding.get("architecture") != saved_architecture:
         raise RuntimeError("v3 architecture binding is missing")
     if int(binding.get("hidden_size", -1)) != EXPECTED_HIDDEN_SIZE:
         raise RuntimeError("v3 hidden-size binding mismatch")
@@ -408,7 +431,7 @@ def load_stage_pair_checkpoint_v3(
     }
     if set(payload) != required:
         raise RuntimeError("v3 heads schema mismatch")
-    if payload["architecture"] != ARCHITECTURE_ID or int(payload["hidden_size"]) != EXPECTED_HIDDEN_SIZE:
+    if payload["architecture"] != str(get_by_path(cfg, "architecture.id")) or int(payload["hidden_size"]) != EXPECTED_HIDDEN_SIZE:
         raise RuntimeError("v3 heads identity mismatch")
     raw.frame_projector.load_state_dict(payload["frame_projector"], strict=True)
     raw.set_encoder.load_state_dict(payload["set_encoder"], strict=True)

@@ -76,7 +76,7 @@ def test_chunk_certification_accepts_exact_full_parity(tmp_path):
 
 def test_chunk_certification_rejects_prediction_mismatch(tmp_path):
     paths = _artifacts(tmp_path, prediction_flip=True)
-    with pytest.raises(RuntimeError, match="parity failed"):
+    with pytest.raises(RuntimeError, match="parity failed|not canonical CPU float32 scorer output"):
         certify_chunked_parity(
             legacy_raw=paths["legacy"],
             legacy_repeat_raw=paths["repeat"],

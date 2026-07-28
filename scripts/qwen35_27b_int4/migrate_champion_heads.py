@@ -47,6 +47,11 @@ def migrate_champion_heads(
     if int(payload.get("hidden_size", -1)) != 4096:
         raise RuntimeError("Champion source heads must have hidden_size=4096")
     cfg = load_config(config)
+    architecture_id = str(cfg.get("architecture", {}).get("id", ""))
+    from snu_order.qwen3vl.qwen35_27b_port import SUPPORTED_ARCHITECTURE_IDS
+
+    if architecture_id not in SUPPORTED_ARCHITECTURE_IDS:
+        raise RuntimeError(f"Unsupported 27B migration architecture: {architecture_id!r}")
     torch.manual_seed(int(cfg.get("experiment", {}).get("seed", 42)))
     model = build_stage_pair_head_from_config(cfg, hidden_size=5120, backbone=None)
     loaded: list[str] = []
@@ -80,7 +85,7 @@ def migrate_champion_heads(
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "architecture": "qwen35_27b_stage_pair_e1_int4_v1",
+            "architecture": architecture_id,
             "hidden_size": 5120,
             "model_dim": int(model.model_dim),
             "pooling_mode": str(model.pooling_mode),
@@ -98,7 +103,7 @@ def migrate_champion_heads(
         "source_checkpoint_sha256": file_sha256(heads_path),
         "destination": str(destination.resolve()),
         "destination_schema": {
-            "architecture": "qwen35_27b_stage_pair_e1_int4_v1",
+            "architecture": architecture_id,
             "hidden_size": 5120,
             "model_dim": int(model.model_dim),
         },

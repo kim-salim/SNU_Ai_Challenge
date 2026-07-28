@@ -12,8 +12,13 @@ import torch
 from snu_order.utils.io import write_csv_rows, write_json
 
 from .metrics24 import compute_metrics_from_logits, rows_from_logits
-from .permutations import PAIRS, pairwise_labels_from_answer, perm_index_to_answer
-from .stage_pair_scorer import pair_targets_from_answer, stage_targets_from_answer
+from .permutations import PAIRS, PERMS, pairwise_labels_from_answer, perm_index_to_answer
+from .stage_pair_scorer import (
+    pair_scores_from_logits,
+    pair_targets_from_answer,
+    stage_scores_from_logits,
+    stage_targets_from_answer,
+)
 
 
 def _position_stage_accuracy(stage_logits: torch.Tensor, answer: torch.Tensor) -> tuple[float, dict[str, float]]:
@@ -100,6 +105,36 @@ def compute_stage_pair_metrics(
     metrics["stage_accuracy_by_position"] = stage_by_position
     metrics.update(_pair_head_metrics(pair_logits, answer))
     metrics.update(_margin_metrics(final_logits, target_perm_idx))
+    stage_component = stage_scores_from_logits(stage_logits.detach().float().cpu())
+    stage_prediction = stage_component.argmax(dim=1)
+    metrics["stage_only_correct_count"] = int(stage_prediction.eq(target_perm_idx.cpu()).sum().item())
+    metrics["stage_component_score_std"] = float(stage_component.std(unbiased=False).item())
+    if pair_logits is not None:
+        pair_component = pair_scores_from_logits(pair_logits.detach().float().cpu())
+        pair_prediction = pair_component.argmax(dim=1)
+        metrics["pair_only_correct_count"] = int(pair_prediction.eq(target_perm_idx.cpu()).sum().item())
+        metrics["pair_component_score_std"] = float(pair_component.std(unbiased=False).item())
+    else:
+        metrics["pair_only_correct_count"] = 0
+        metrics["pair_component_score_std"] = 0.0
+    scores = final_logits.detach().float().cpu()
+    metrics["final_score_std"] = float(scores.std(unbiased=False).item())
+    probabilities = scores.softmax(dim=-1)
+    entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum(dim=-1)
+    metrics["final_entropy_mean"] = float(entropy.mean().item()) if entropy.numel() else 0.0
+    swap_counts = {"1-2": 0, "2-3": 0, "3-4": 0}
+    predictions = scores.argmax(dim=1).tolist()
+    for predicted, target in zip(predictions, target_perm_idx.long().cpu().tolist(), strict=True):
+        pred_order = list(PERMS[int(predicted)])
+        true_order = list(PERMS[int(target)])
+        differing = [index for index in range(4) if pred_order[index] != true_order[index]]
+        if len(differing) == 2 and differing[1] == differing[0] + 1:
+            left = differing[0]
+            swapped = list(true_order)
+            swapped[left], swapped[left + 1] = swapped[left + 1], swapped[left]
+            if pred_order == swapped:
+                swap_counts[f"{left + 1}-{left + 2}"] += 1
+    metrics["adjacent_swap_by_stage"] = swap_counts
     kendall = metrics.get("kendall_distance_histogram", {})
     metrics["kendall_distance_le_2_error_count"] = sum(
         int(kendall.get(str(distance), 0)) for distance in (1, 2)

@@ -1,0 +1,14 @@
+{
+  "git": {
+    "commit": "55db511fe6b38ed5c4a261faef5cdf292af6efcd",
+    "dirty": false
+  },
+  "splits": {
+    "train_split": "/home/shpark/snu-ai-challenge/data/splits/full_train_90_10_v1/train_90_v1.csv",
+    "valid_split": "/home/shpark/snu-ai-challenge/data/splits/full_train_90_10_v1/valid_10_v1.csv",
+    "train_hash": "caf5bb6a840b97cf8520cded4aceb1217c21881531501bf50a0c6a2bb4361284",
+    "valid_hash": "d8ba4e72542c7fa1e9129f90f1e064d6a4161e52941065a20b4270134be451ad"
+  },
+  "mode": "qlora_stage_pair",
+  "run_id": "qwen35_27b_retention_v3_c0_exact_control_ddp8_20260720"
+}
